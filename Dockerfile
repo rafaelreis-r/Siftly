@@ -20,9 +20,21 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 ENV DATABASE_URL=file:/app/data/siftly.db
+
 RUN mkdir -p /app/data
+
+# Standalone Next.js server
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
+
+# Prisma: schema + migrations + generated client
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/app/generated ./app/generated
+
+# Entrypoint for DB init
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 EXPOSE 3000
-CMD ["node", "server.js"]
+CMD ["/docker-entrypoint.sh"]
