@@ -44,8 +44,12 @@ interface MediaEntity {
 interface TweetLegacy {
   full_text?: string
   created_at?: string
-  entities?: { hashtags?: unknown[]; urls?: unknown[]; media?: MediaEntity[] }
+  entities?: { hashtags?: unknown[]; urls?: unknown[]; user_mentions?: unknown[]; media?: MediaEntity[] }
   extended_entities?: { media?: MediaEntity[] }
+}
+
+interface TweetCardLegacy {
+  binding_values?: unknown
 }
 
 interface UserLegacy {
@@ -56,7 +60,170 @@ interface UserLegacy {
 interface TweetResult {
   rest_id?: string
   legacy?: TweetLegacy
+  card?: { legacy?: TweetCardLegacy }
   core?: { user_results?: { result?: { legacy?: UserLegacy } } }
+}
+
+interface UrlEntity {
+  url?: string
+  expanded_url?: string
+  display_url?: string
+}
+
+interface StoredEntities {
+  urls: Array<{ short: string; expanded: string }>
+  hashtags: string[]
+  mentions: string[]
+}
+
+const MAX_RESOLUTION_CONCURRENCY = 5
+const INTERNAL_MEDIA_URL_PATTERNS = [
+  /^https:\/\/pbs\.twimg\.com/i,
+  /^https:\/\/video\.twimg\.com/i,
+]
+
+let activeResolutions = 0
+const resolutionQueue: Array<() => void> = []
+
+async function withResolutionSlot<T>(task: () => Promise<T>): Promise<T> {
+  if (activeResolutions >= MAX_RESOLUTION_CONCURRENCY) {
+    await new Promise<void>((resolve) => {
+      resolutionQueue.push(resolve)
+    })
+  }
+
+  activeResolutions++
+  try {
+    return await task()
+  } finally {
+    activeResolutions--
+    const next = resolutionQueue.shift()
+    if (next) next()
+  }
+}
+
+function isInternalMediaUrl(url: string): boolean {
+  return INTERNAL_MEDIA_URL_PATTERNS.some((pattern) => pattern.test(url))
+}
+
+async function tryResolveUrlWithMethod(
+  url: string,
+  method: 'HEAD' | 'GET',
+): Promise<string | null> {
+  try {
+    const response = await fetch(url, {
+      method,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(5000),
+    })
+
+    if (!response.ok) return null
+    return response.url || url
+  } catch {
+    return null
+  }
+}
+
+export async function resolveUrl(url: string): Promise<string> {
+  if (!url) return url
+
+  return withResolutionSlot(async () => {
+    const headResolved = await tryResolveUrlWithMethod(url, 'HEAD')
+    if (headResolved) return headResolved
+
+    const getResolved = await tryResolveUrlWithMethod(url, 'GET')
+    if (getResolved) return getResolved
+
+    return url
+  })
+}
+
+function collectCardUrlCandidates(tweet: TweetResult): Array<{ short: string; candidate: string }> {
+  const bindingValues = tweet.card?.legacy?.binding_values
+  if (!bindingValues) return []
+
+  const out: Array<{ short: string; candidate: string }> = []
+
+  if (Array.isArray(bindingValues)) {
+    for (const entry of bindingValues as Record<string, unknown>[]) {
+      const key = String(entry?.key ?? '')
+      if (key !== 'card_url') continue
+
+      const valueObj = (entry?.value as Record<string, unknown> | undefined) ?? {}
+      const candidate = String(
+        valueObj.string_value ?? valueObj.url ?? valueObj.expanded_url ?? ''
+      ).trim()
+      if (!candidate || isInternalMediaUrl(candidate)) continue
+      out.push({ short: candidate, candidate })
+    }
+    return out
+  }
+
+  if (typeof bindingValues === 'object' && bindingValues !== null) {
+    const map = bindingValues as Record<string, unknown>
+    const rawCardUrl = map.card_url
+    if (!rawCardUrl) return out
+    const rawObj = rawCardUrl as Record<string, unknown>
+    const candidate = String(
+      rawObj.string_value ?? rawObj.url ?? rawObj.expanded_url ?? rawCardUrl ?? ''
+    ).trim()
+    if (!candidate || isInternalMediaUrl(candidate)) return out
+    out.push({ short: candidate, candidate })
+  }
+
+  return out
+}
+
+async function extractAndResolveEntities(tweet: TweetResult): Promise<StoredEntities> {
+  const hashtags = (tweet.legacy?.entities?.hashtags ?? [])
+    .map((item) => String((item as { text?: string })?.text ?? '').trim())
+    .filter(Boolean)
+  const mentions = (tweet.legacy?.entities?.user_mentions ?? [])
+    .map((item) => String((item as { screen_name?: string })?.screen_name ?? '').trim())
+    .filter(Boolean)
+
+  const entityUrlCandidates = (tweet.legacy?.entities?.urls ?? [])
+    .map((item) => item as UrlEntity)
+    .map((item) => {
+      const short = String(item.url ?? '').trim()
+      const candidate = String(item.expanded_url ?? item.url ?? '').trim()
+      return { short, candidate }
+    })
+    .filter((item) => item.candidate && !isInternalMediaUrl(item.candidate))
+
+  const allCandidates = [...entityUrlCandidates, ...collectCardUrlCandidates(tweet)]
+  if (allCandidates.length === 0) {
+    return { urls: [], hashtags, mentions }
+  }
+
+  const resolvedEntries = await Promise.all(
+    allCandidates.map(async ({ short, candidate }) => {
+      const resolved = await resolveUrl(candidate)
+      if (!resolved || isInternalMediaUrl(resolved)) return null
+      return {
+        short: short || candidate,
+        expanded: resolved,
+      }
+    })
+  )
+
+  const deduped = new Map<string, { short: string; expanded: string }>()
+  for (const entry of resolvedEntries) {
+    if (!entry) continue
+    const key = `${entry.short}::${entry.expanded}`
+    if (!deduped.has(key)) deduped.set(key, entry)
+  }
+
+  return { urls: Array.from(deduped.values()), hashtags, mentions }
+}
+
+function parseStoredTweet(rawJson: string): TweetResult | null {
+  if (!rawJson) return null
+  try {
+    return JSON.parse(rawJson) as TweetResult
+  } catch {
+    return null
+  }
 }
 
 async function fetchPage(authToken: string, ct0: string, cursor?: string) {
@@ -179,6 +346,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
         const media = extractMedia(tweet)
         const userLegacy = tweet.core?.user_results?.result?.legacy ?? {}
+        const entities = await extractAndResolveEntities(tweet)
 
         const created = await prisma.bookmark.create({
           data: {
@@ -190,6 +358,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
               ? new Date(tweet.legacy.created_at)
               : null,
             rawJson: JSON.stringify(tweet),
+            entities: JSON.stringify(entities),
           },
         })
 
@@ -218,4 +387,39 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   return NextResponse.json({ imported, skipped })
+}
+
+export async function PATCH(): Promise<NextResponse> {
+  try {
+    const bookmarks = await prisma.bookmark.findMany({
+      where: {
+        OR: [
+          { entities: null },
+          { entities: { contains: 't.co/' } },
+        ],
+      },
+      take: 50,
+      select: { id: true, rawJson: true },
+    })
+
+    let updated = 0
+    for (const bookmark of bookmarks) {
+      const tweet = parseStoredTweet(bookmark.rawJson)
+      if (!tweet) continue
+
+      const entities = await extractAndResolveEntities(tweet)
+      await prisma.bookmark.update({
+        where: { id: bookmark.id },
+        data: { entities: JSON.stringify(entities) },
+      })
+      updated++
+    }
+
+    return NextResponse.json({ updated })
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Failed to resolve URLs' },
+      { status: 500 }
+    )
+  }
 }
