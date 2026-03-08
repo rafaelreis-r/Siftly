@@ -71,12 +71,7 @@ interface MediaEntity {
 interface TweetLegacy {
   full_text?: string
   created_at?: string
-  entities?: {
-    hashtags?: unknown[]
-    urls?: unknown[]
-    user_mentions?: unknown[]
-    media?: MediaEntity[]
-  }
+  entities?: { hashtags?: unknown[]; urls?: unknown[]; media?: MediaEntity[] }
   extended_entities?: { media?: MediaEntity[] }
 }
 
@@ -85,11 +80,18 @@ interface UserLegacy {
   name?: string
 }
 
+interface ArticleBlock {
+  text?: string
+  type?: string
+}
+
 interface ArticleResult {
   title?: string
   preview_image?: { url?: string }
   cover_media?: { media_info?: { original_img_url?: string } }
   content?: string
+  // Some X article payloads include a Draft.js-like content_state
+  content_state?: { blocks?: ArticleBlock[] }
 }
 
 interface TweetResult {
@@ -172,105 +174,34 @@ function bestVideoUrl(variants: MediaVariant[]): string | null {
   return mp4[0]?.url ?? null
 }
 
-function decodeHtmlEntities(text: string): string {
-  return text
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;|&apos;/g, "'")
-}
-
-type UrlEntity = { url?: string; expanded_url?: string; display_url?: string }
-
-type StoredEntities = {
-  urls: Array<{ short: string; expanded: string }>
-  hashtags: string[]
-  mentions: string[]
-}
-
-const MAX_URL_RESOLVE_CONCURRENCY = 5
-let activeUrlResolves = 0
-const urlResolveQueue: Array<() => void> = []
-
-async function withUrlResolveSlot<T>(fn: () => Promise<T>): Promise<T> {
-  if (activeUrlResolves >= MAX_URL_RESOLVE_CONCURRENCY) {
-    await new Promise<void>((resolve) => urlResolveQueue.push(resolve))
-  }
-  activeUrlResolves++
-  try {
-    return await fn()
-  } finally {
-    activeUrlResolves--
-    urlResolveQueue.shift()?.()
-  }
-}
-
-async function tryResolve(url: string, method: 'HEAD' | 'GET'): Promise<string | null> {
-  try {
-    const res = await fetch(url, { method, redirect: 'follow', signal: AbortSignal.timeout(5000) })
-    if (!res.ok) return null
-    return res.url || url
-  } catch {
-    return null
-  }
-}
-
-async function resolveTco(url: string): Promise<string> {
-  if (!url) return url
-  // Only spend network calls on t.co shortlinks
-  if (!/^https?:\/\/t\.co\//i.test(url)) return url
-
-  return withUrlResolveSlot(async () => {
-    const head = await tryResolve(url, 'HEAD')
-    if (head) return head
-    const get = await tryResolve(url, 'GET')
-    if (get) return get
-    return url
-  })
-}
-
-async function extractEntities(tweet: TweetResult): Promise<StoredEntities> {
-  const hashtags = (tweet.legacy?.entities?.hashtags ?? [])
-    .map((h) => String((h as { text?: string })?.text ?? '').trim())
+function articleBlocksText(article: ArticleResult): string {
+  const blocks = article.content_state?.blocks ?? []
+  const texts = blocks
+    .map((b) => (b.text ?? '').trim())
     .filter(Boolean)
-
-  const mentions = (tweet.legacy?.entities?.user_mentions ?? [])
-    .map((m) => String((m as { screen_name?: string })?.screen_name ?? '').trim())
-    .filter(Boolean)
-
-  const urlsRaw = (tweet.legacy?.entities?.urls ?? [])
-    .map((u) => u as UrlEntity)
-    .map((u) => {
-      const short = String(u.url ?? '').trim()
-      const expanded = String(u.expanded_url ?? u.url ?? '').trim()
-      return short && expanded ? { short, expanded } : null
-    })
-    .filter(Boolean) as Array<{ short: string; expanded: string }>
-
-  const urlsResolved = await Promise.all(
-    urlsRaw.map(async (u) => ({ short: u.short, expanded: await resolveTco(u.expanded) }))
-  )
-
-  // de-dupe
-  const map = new Map<string, { short: string; expanded: string }>()
-  for (const u of urlsResolved) map.set(u.expanded, u)
-
-  return { urls: Array.from(map.values()), hashtags, mentions }
+    .slice(0, 8)
+  return texts.join('\n\n')
 }
 
 function tweetFullText(tweet: TweetResult): string {
   if (tweet.note_tweet?.note_tweet_results?.result?.text) {
-    return decodeHtmlEntities(tweet.note_tweet.note_tweet_results.result.text)
+    return tweet.note_tweet.note_tweet_results.result.text
   }
   const article = tweet.article?.article_results?.result
   if (article) {
     const parts: string[] = []
     if (article.title) parts.push(article.title)
     if (article.content) parts.push(article.content)
-    if (parts.length > 0) return decodeHtmlEntities(parts.join('\n\n'))
+
+    // Fallback: some X articles ship content in content_state.blocks
+    if (parts.length === 0) {
+      const blocks = articleBlocksText(article)
+      if (blocks) parts.push(blocks)
+    }
+
+    if (parts.length > 0) return parts.join('\n\n')
   }
-  return decodeHtmlEntities(tweet.legacy?.full_text ?? '')
+  return tweet.legacy?.full_text ?? ''
 }
 
 function extractMedia(tweet: TweetResult) {
@@ -353,9 +284,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             text: tweetFullText(tweet),
             authorHandle: userLegacy.screen_name ?? 'unknown',
             authorName: userLegacy.name ?? 'Unknown',
-            tweetCreatedAt: tweet.legacy?.created_at ? new Date(tweet.legacy.created_at) : null,
+            tweetCreatedAt: tweet.legacy?.created_at
+              ? new Date(tweet.legacy.created_at)
+              : null,
             rawJson: JSON.stringify(tweet),
-            entities: JSON.stringify(await extractEntities(tweet)),
             source,
           },
         })
