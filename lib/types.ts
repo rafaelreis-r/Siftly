@@ -18,6 +18,11 @@ export interface BookmarkWithMedia {
   id: string
   tweetId: string
   text: string
+  entities?: {
+    urls?: Array<{ short?: string; expanded?: string }>
+    hashtags?: string[]
+    mentions?: string[]
+  } | null
   authorHandle: string
   authorName: string
   tweetCreatedAt: string | null

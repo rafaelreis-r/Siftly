@@ -5,6 +5,21 @@ const DEFAULT_PAGE = 1
 const DEFAULT_LIMIT = 24
 const MAX_LIMIT = 100
 
+function parseBookmarkEntities(
+  entities: string | null,
+): { urls?: Array<{ short?: string; expanded?: string }>; hashtags?: string[]; mentions?: string[] } | null {
+  if (!entities) return null
+  try {
+    return JSON.parse(entities) as {
+      urls?: Array<{ short?: string; expanded?: string }>
+      hashtags?: string[]
+      mentions?: string[]
+    }
+  } catch {
+    return null
+  }
+}
+
 function parseIntParam(value: string | null, defaultValue: number): number {
   if (!value) return defaultValue
   const parsed = parseInt(value, 10)
@@ -95,6 +110,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       id: bookmark.id,
       tweetId: bookmark.tweetId,
       text: bookmark.text,
+      entities: parseBookmarkEntities(bookmark.entities),
       authorHandle: bookmark.authorHandle,
       authorName: bookmark.authorName,
       tweetCreatedAt: bookmark.tweetCreatedAt?.toISOString() ?? null,

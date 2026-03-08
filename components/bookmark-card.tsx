@@ -508,8 +508,12 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
   // Always strip t.co shortlinks from display text — Twitter appends them to every tweet
   const tcoUrls = bookmark.text.match(TCO_REGEX) ?? []
   const cleanText = stripTcoUrls(bookmark.text)
+  const firstEntityUrl = bookmark.entities?.urls?.[0]
+  const resolvedPreviewUrl = firstEntityUrl?.expanded ?? firstEntityUrl?.short ?? null
   // Show link preview only when there's no real media attached
-  const previewUrl = !hasMedia && tcoUrls.length > 0 ? tcoUrls[tcoUrls.length - 1] : null
+  const previewUrl = !hasMedia
+    ? (resolvedPreviewUrl || (tcoUrls.length > 0 ? tcoUrls[tcoUrls.length - 1] : null))
+    : null
 
   const TEXT_LIMIT = 280
   const isLong = cleanText.length > TEXT_LIMIT

@@ -76,6 +76,15 @@ interface StoredEntities {
   mentions: string[]
 }
 
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+}
+
 const MAX_RESOLUTION_CONCURRENCY = 5
 const INTERNAL_MEDIA_URL_PATTERNS = [
   /^https:\/\/pbs\.twimg\.com/i,
@@ -351,7 +360,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         const created = await prisma.bookmark.create({
           data: {
             tweetId: tweet.rest_id,
-            text: tweet.legacy?.full_text ?? '',
+            text: decodeHtmlEntities(tweet.legacy?.full_text ?? ''),
             authorHandle: userLegacy.screen_name ?? 'unknown',
             authorName: userLegacy.name ?? 'Unknown',
             tweetCreatedAt: tweet.legacy?.created_at
@@ -395,10 +404,11 @@ export async function PATCH(): Promise<NextResponse> {
       where: {
         OR: [
           { entities: null },
-          { entities: { contains: 't.co/' } },
+          { entities: { contains: '"urls":[]' } },
+          { entities: { contains: 't.co' } },
         ],
       },
-      take: 50,
+      take: 200,
       select: { id: true, rawJson: true },
     })
 
@@ -410,7 +420,10 @@ export async function PATCH(): Promise<NextResponse> {
       const entities = await extractAndResolveEntities(tweet)
       await prisma.bookmark.update({
         where: { id: bookmark.id },
-        data: { entities: JSON.stringify(entities) },
+        data: {
+          text: decodeHtmlEntities(tweet.legacy?.full_text ?? ''),
+          entities: JSON.stringify(entities),
+        },
       })
       updated++
     }

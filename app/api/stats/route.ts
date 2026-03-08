@@ -1,6 +1,21 @@
 import { NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 
+function parseBookmarkEntities(
+  entities: string | null,
+): { urls?: Array<{ short?: string; expanded?: string }>; hashtags?: string[]; mentions?: string[] } | null {
+  if (!entities) return null
+  try {
+    return JSON.parse(entities) as {
+      urls?: Array<{ short?: string; expanded?: string }>
+      hashtags?: string[]
+      mentions?: string[]
+    }
+  } catch {
+    return null
+  }
+}
+
 export async function GET(): Promise<NextResponse> {
   try {
     const [
@@ -44,6 +59,7 @@ export async function GET(): Promise<NextResponse> {
       id: b.id,
       tweetId: b.tweetId,
       text: b.text,
+      entities: parseBookmarkEntities(b.entities),
       authorHandle: b.authorHandle,
       authorName: b.authorName,
       tweetCreatedAt: b.tweetCreatedAt?.toISOString() ?? null,

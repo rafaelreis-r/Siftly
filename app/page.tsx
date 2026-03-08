@@ -25,6 +25,21 @@ const TOP_CATS_QUERY = {
   take: 10,
 } as const
 
+function parseBookmarkEntities(
+  entities: string | null,
+): { urls?: Array<{ short?: string; expanded?: string }>; hashtags?: string[]; mentions?: string[] } | null {
+  if (!entities) return null
+  try {
+    return JSON.parse(entities) as {
+      urls?: Array<{ short?: string; expanded?: string }>
+      hashtags?: string[]
+      mentions?: string[]
+    }
+  } catch {
+    return null
+  }
+}
+
 async function queryDashboard() {
   return Promise.all([
     prisma.bookmark.count(),
@@ -45,6 +60,7 @@ function buildDashboardData(result: QueryResult) {
     id: b.id,
     tweetId: b.tweetId,
     text: b.text,
+    entities: parseBookmarkEntities(b.entities),
     authorHandle: b.authorHandle,
     authorName: b.authorName,
     tweetCreatedAt: b.tweetCreatedAt?.toISOString() ?? null,
