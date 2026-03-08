@@ -28,9 +28,10 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 
-# Prisma: schema + migrations + generated client
+# Prisma: schema + migrations + generated client + CLI/runtime deps
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/app/generated ./app/generated
+COPY --from=builder /app/node_modules ./node_modules
 
 # Entrypoint for DB init
 COPY docker-entrypoint.sh /docker-entrypoint.sh
