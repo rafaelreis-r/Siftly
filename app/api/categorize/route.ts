@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
-import { createCliAnthropicClient } from '@/lib/claude-cli-auth'
+import { resolveAiClient } from '@/lib/ai-client'
 import {
   seedDefaultCategories,
   categorizeBatch,
@@ -145,23 +144,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const dbApiKey =
     (await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } }))?.value?.trim() || ''
-  const anthropicApiKey = dbApiKey || process.env.ANTHROPIC_API_KEY || ''
-  const baseURL = process.env.ANTHROPIC_BASE_URL
 
   void (async () => {
     const counts = { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0 }
 
     try {
-      // CLI auth is tried before env var so .env placeholders don't block CLI users
-      const resolvedClient = dbApiKey
-        ? new Anthropic({ apiKey: dbApiKey, ...(baseURL ? { baseURL } : {}) })
-        : (createCliAnthropicClient(baseURL) ?? (anthropicApiKey ? new Anthropic({ apiKey: anthropicApiKey, ...(baseURL ? { baseURL } : {}) }) : null))
+      let client: { messages: { create: (params: any) => Promise<any> } } | null
+      try {
+        client = await resolveAiClient(dbApiKey)
+      } catch {
+        client = null
+      }
 
-      if (!resolvedClient) {
-        setState({ lastError: 'No Anthropic API key configured. Go to Settings to add one, or log in with Claude CLI.' })
+      if (!client) {
+        setState({ lastError: 'No AI API key configured. Go to Settings to add one.' })
         console.error('No API key or CLI auth — skipping pipeline')
       } else {
-        const client: Anthropic = resolvedClient
 
         await seedDefaultCategories()
 
@@ -240,7 +238,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                 })
                 const batch = rows.map(mapBookmarkForCategorization)
                 try {
-                  const results = await categorizeBatch(batch, client, categoryDescriptions, allSlugs)
+                  const results = await categorizeBatch(batch, client!, categoryDescriptions, allSlugs)
                   await writeCategoryResults(results)
                   counts.categorized += ids.length
                   setState({ stageCounts: { ...counts } })
@@ -281,7 +279,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
               try {
                 await analyzeItem(
                   { id: media.id, url: media.url, thumbnailUrl: media.thumbnailUrl, type: media.type },
-                  client,
+                  client!,
                   model,
                 )
                 anyVisionRan = true
@@ -321,7 +319,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                 try {
                   const results = await enrichBatchSemanticTags(
                     [{ id: bm.id, text: bm.text, imageTags, entities }],
-                    client,
+                    client!,
                   )
                   const result = results[0]
                   if (result?.tags.length) {

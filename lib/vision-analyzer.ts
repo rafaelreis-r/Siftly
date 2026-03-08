@@ -1,6 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
 import { buildImageContext } from '@/lib/image-context'
+import { getPreferredModel } from '@/lib/ai-client'
 
 // Module-level model cache — avoids hundreds of DB roundtrips per pipeline run
 let _cachedModel: string | null = null
@@ -8,8 +8,7 @@ let _modelCacheExpiry = 0
 
 export async function getAnthropicModel(): Promise<string> {
   if (_cachedModel && Date.now() < _modelCacheExpiry) return _cachedModel
-  const setting = await prisma.setting.findUnique({ where: { key: 'anthropicModel' } })
-  _cachedModel = setting?.value ?? 'claude-opus-4-6'
+  _cachedModel = await getPreferredModel()
   _modelCacheExpiry = Date.now() + 5 * 60 * 1000
   return _cachedModel
 }
@@ -79,7 +78,7 @@ const CONCURRENCY = 12
 
 async function analyzeImageWithRetry(
   url: string,
-  client: Anthropic,
+  client: { messages: { create: (params: any) => Promise<any> } },
   model: string,
   attempt = 0,
 ): Promise<string> {
@@ -100,7 +99,7 @@ async function analyzeImageWithRetry(
         },
       ],
     })
-    const raw = msg.content.find((b) => b.type === 'text')?.text?.trim() ?? ''
+    const raw = msg.content.find((b: any) => b.type === 'text')?.text?.trim() ?? ''
     if (!raw) return ''
 
     // Validate it's parseable JSON
@@ -160,7 +159,7 @@ async function getCachedAnalysis(imageUrl: string, excludeId: string): Promise<s
 
 export async function analyzeItem(
   item: MediaItemForAnalysis,
-  client: Anthropic,
+  client: { messages: { create: (params: any) => Promise<any> } },
   model: string,
 ): Promise<number> {
   const imageUrl = item.type === 'video' ? (item.thumbnailUrl ?? item.url) : item.url
@@ -212,7 +211,7 @@ export async function runWithConcurrency<T>(
 
 export async function analyzeBatch(
   items: MediaItemForAnalysis[],
-  client: Anthropic,
+  client: { messages: { create: (params: any) => Promise<any> } },
   onProgress?: (delta: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
@@ -232,7 +231,7 @@ export async function analyzeBatch(
   return results.reduce((sum, r) => sum + r, 0)
 }
 
-export async function analyzeUntaggedImages(client: Anthropic, limit = 10): Promise<number> {
+export async function analyzeUntaggedImages(client: { messages: { create: (params: any) => Promise<any> } }, limit = 10): Promise<number> {
   const untagged = await prisma.mediaItem.findMany({
     where: { imageTags: null, type: { in: ['photo', 'gif', 'video'] } },
     take: limit,
@@ -246,7 +245,7 @@ export async function analyzeUntaggedImages(client: Anthropic, limit = 10): Prom
  * Analyze ALL untagged media items (no limit). Used during full AI categorization.
  */
 export async function analyzeAllUntagged(
-  client: Anthropic,
+  client: { messages: { create: (params: any) => Promise<any> } },
   onProgress?: (total: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
@@ -346,7 +345,7 @@ ${JSON.stringify(items, null, 1)}`
 
 export async function enrichBatchSemanticTags(
   bookmarks: BookmarkForEnrichment[],
-  client: Anthropic,
+  client: { messages: { create: (params: any) => Promise<any> } },
 ): Promise<EnrichmentResult[]> {
   if (bookmarks.length === 0) return []
 
@@ -362,7 +361,7 @@ export async function enrichBatchSemanticTags(
         max_tokens: 4096,
         messages: [{ role: 'user', content: prompt }],
       })
-      const text = msg.content.find((b) => b.type === 'text')?.text ?? ''
+      const text = msg.content.find((b: any) => b.type === 'text')?.text ?? ''
       const match = text.match(/\[[\s\S]*\]/)
       if (!match) {
         console.warn(`[enrich] no JSON array in response (attempt ${attempt + 1}), text length: ${text.length}`)
@@ -396,7 +395,7 @@ export async function enrichBatchSemanticTags(
  * with ENRICH_CONCURRENCY parallel batches — 5-10x fewer API calls vs. per-bookmark.
  */
 export async function enrichAllBookmarks(
-  client: Anthropic,
+  client: { messages: { create: (params: any) => Promise<any> } },
   onProgress?: (total: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
@@ -505,7 +504,7 @@ export async function enrichBookmarkSemanticTags(
   bookmarkId: string,
   tweetText: string,
   imageTags: string[],
-  client: Anthropic,
+  client: { messages: { create: (params: any) => Promise<any> } },
   entities?: BookmarkForEnrichment['entities'],
 ): Promise<string[]> {
   const results = await enrichBatchSemanticTags(

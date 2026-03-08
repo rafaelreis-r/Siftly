@@ -1,7 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
 import { buildImageContext } from '@/lib/image-context'
-import { createCliAnthropicClient } from '@/lib/claude-cli-auth'
+import { resolveAiClient } from '@/lib/ai-client'
 import { getAnthropicModel } from '@/lib/vision-analyzer'
 
 const BATCH_SIZE = 20
@@ -162,33 +161,8 @@ export async function seedDefaultCategories(): Promise<void> {
  * CLI auth is intentionally checked before the env var so that users with
  * Claude Code CLI signed in are never blocked by a placeholder in .env.
  */
-async function resolveAnthropicClient(overrideKey?: string): Promise<Anthropic> {
-  const baseURL = process.env.ANTHROPIC_BASE_URL
-
-  if (overrideKey && overrideKey.trim() !== '') {
-    return new Anthropic({ apiKey: overrideKey.trim(), ...(baseURL ? { baseURL } : {}) })
-  }
-
-  const setting = await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } })
-  if (setting?.value && setting.value.trim() !== '') {
-    return new Anthropic({ apiKey: setting.value.trim(), ...(baseURL ? { baseURL } : {}) })
-  }
-
-  // Try CLI auth before env var — prevents .env placeholders from blocking CLI users
-  const cliClient = createCliAnthropicClient(baseURL)
-  if (cliClient) return cliClient
-
-  const envKey = process.env.ANTHROPIC_API_KEY
-  if (envKey && envKey.trim() !== '') {
-    return new Anthropic({ apiKey: envKey.trim(), ...(baseURL ? { baseURL } : {}) })
-  }
-
-  // Local proxy handles auth
-  if (baseURL) return new Anthropic({ apiKey: 'proxy', baseURL })
-
-  throw new Error(
-    'No Anthropic API key found. Add your key in Settings, or log in with the Claude CLI.',
-  )
+async function resolveAnthropicClient(overrideKey?: string) {
+  return resolveAiClient(overrideKey)
 }
 
 
@@ -272,7 +246,7 @@ function parseCategorizationResponse(text: string, validSlugs: Set<string>): Cat
 
 export async function categorizeBatch(
   bookmarks: BookmarkForCategorization[],
-  client: Anthropic,
+  client: { messages: { create: (params: any) => Promise<any> } },
   categoryDescriptions: Record<string, string> = {},
   allSlugs: string[] = DEFAULT_SLUGS,
 ): Promise<CategorizationResult[]> {
@@ -287,7 +261,7 @@ export async function categorizeBatch(
     messages: [{ role: 'user', content: prompt }],
   })
 
-  const textBlock = message.content.find((b) => b.type === 'text')
+  const textBlock = message.content.find((b: any) => b.type === 'text')
   if (!textBlock || textBlock.type !== 'text') throw new Error('No text content in Claude response')
 
   return parseCategorizationResponse(textBlock.text, new Set(allSlugs))

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
 import { createCliAnthropicClient, getCliAuthStatus } from '@/lib/claude-cli-auth'
+import { createOpenAIAnthropicShim } from '@/lib/ai-client'
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let body: { provider?: string } = {}
