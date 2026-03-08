@@ -74,6 +74,7 @@ interface StoredEntities {
   urls: Array<{ short: string; expanded: string }>
   hashtags: string[]
   mentions: string[]
+  urlsResolved: true
 }
 
 function decodeHtmlEntities(text: string): string {
@@ -202,7 +203,7 @@ async function extractAndResolveEntities(tweet: TweetResult): Promise<StoredEnti
 
   const allCandidates = [...entityUrlCandidates, ...collectCardUrlCandidates(tweet)]
   if (allCandidates.length === 0) {
-    return { urls: [], hashtags, mentions }
+    return { urls: [], hashtags, mentions, urlsResolved: true }
   }
 
   const resolvedEntries = await Promise.all(
@@ -223,7 +224,7 @@ async function extractAndResolveEntities(tweet: TweetResult): Promise<StoredEnti
     if (!deduped.has(key)) deduped.set(key, entry)
   }
 
-  return { urls: Array.from(deduped.values()), hashtags, mentions }
+  return { urls: Array.from(deduped.values()), hashtags, mentions, urlsResolved: true }
 }
 
 function parseStoredTweet(rawJson: string): TweetResult | null {
@@ -404,8 +405,7 @@ export async function PATCH(): Promise<NextResponse> {
       where: {
         OR: [
           { entities: null },
-          { entities: { contains: '"urls":[]' } },
-          { entities: { contains: 't.co' } },
+          { entities: { not: { contains: '"urlsResolved":true' } } },
         ],
       },
       take: 200,
