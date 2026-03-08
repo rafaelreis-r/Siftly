@@ -29,8 +29,9 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 
-# Prisma: schema + migrations + generated client + CLI/runtime deps
+# Prisma: schema + migrations + config + generated client + CLI/runtime deps
 COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/app/generated ./app/generated
 COPY --from=builder /app/node_modules ./node_modules
 
