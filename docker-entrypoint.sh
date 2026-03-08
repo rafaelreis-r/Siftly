@@ -6,7 +6,7 @@ mkdir -p /app/data
 
 if [ ! -f "/app/data/siftly.db" ]; then
   echo "[entrypoint] First run — initialising database..."
-  /app/node_modules/.bin/prisma db push --schema=/app/prisma/schema.prisma
+  /app/node_modules/.bin/prisma db push --schema=/app/prisma/schema.prisma --url="${DATABASE_URL}"
   echo "[entrypoint] Database ready."
 fi
 
