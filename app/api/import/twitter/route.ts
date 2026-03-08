@@ -16,7 +16,7 @@ const FEATURES = JSON.stringify({
   graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
   view_counts_everywhere_api_enabled: true,
   longform_notetweets_consumption_enabled: true,
-  responsive_web_twitter_article_tweet_consumption_enabled: false,
+  responsive_web_twitter_article_tweet_consumption_enabled: true,
   tweet_awards_web_tipping_enabled: false,
   freedom_of_speech_not_reach_fetch_enabled: true,
   standardized_nudges_misinfo: true,
@@ -58,11 +58,28 @@ interface UserLegacy {
   name?: string
 }
 
+interface ArticleBlock {
+  text?: string
+  type?: string
+}
+
 interface TweetResult {
   rest_id?: string
   legacy?: TweetLegacy
   card?: { legacy?: TweetCardLegacy }
   core?: { user_results?: { result?: { legacy?: UserLegacy } } }
+  article?: { article_results?: { result?: { content_state?: { blocks?: ArticleBlock[] } } } }
+}
+
+function extractArticleText(tweet: TweetResult): string | null {
+  const blocks = tweet.article?.article_results?.result?.content_state?.blocks
+  if (!blocks || blocks.length === 0) return null
+  // First block is typically the title, next few are intro
+  const texts = blocks
+    .filter((b) => b.text && b.text.trim().length > 0)
+    .map((b) => b.text!.trim())
+    .slice(0, 5) // title + first 4 paragraphs
+  return texts.length > 0 ? texts.join(' ') : null
 }
 
 interface UrlEntity {
@@ -362,7 +379,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         const created = await prisma.bookmark.create({
           data: {
             tweetId: tweet.rest_id,
-            text: decodeHtmlEntities(tweet.legacy?.full_text ?? ''),
+            text: extractArticleText(tweet) ?? decodeHtmlEntities(tweet.legacy?.full_text ?? ''),
             authorHandle: userLegacy.screen_name ?? 'unknown',
             authorName: userLegacy.name ?? 'Unknown',
             tweetCreatedAt: tweet.legacy?.created_at
@@ -419,14 +436,18 @@ export async function PATCH(): Promise<NextResponse> {
       if (!tweet) continue
 
       const entities = await extractAndResolveEntities(tweet)
-      const tweetText = decodeHtmlEntities(tweet.legacy?.full_text ?? '')
       const storedText = bookmark.text.trim()
-      let nextText = tweetText
+      let nextText = decodeHtmlEntities(tweet.legacy?.full_text ?? '')
 
-      if ((storedText === '' || /^https?:\/\//i.test(storedText)) && entities.urls[0]?.expanded) {
+      // Prefer article content from rawJson (X longform articles)
+      const articleText = extractArticleText(tweet)
+      if (articleText) {
+        nextText = articleText
+      } else if ((storedText === '' || /^https?:\/\//i.test(storedText)) && entities.urls[0]?.expanded) {
+        // Fallback: try fetching URL content only for non-article URLs
         const content = await fetchUrlContent(entities.urls[0].expanded)
         if (content?.title) {
-          nextText = content.title
+          nextText = [content.title, content.description].filter(Boolean).join('. ')
         }
       }
 
