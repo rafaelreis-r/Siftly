@@ -71,7 +71,12 @@ interface MediaEntity {
 interface TweetLegacy {
   full_text?: string
   created_at?: string
-  entities?: { hashtags?: unknown[]; urls?: unknown[]; media?: MediaEntity[] }
+  entities?: {
+    hashtags?: unknown[]
+    urls?: unknown[]
+    user_mentions?: unknown[]
+    media?: MediaEntity[]
+  }
   extended_entities?: { media?: MediaEntity[] }
 }
 
@@ -167,6 +172,71 @@ function parsePage(data: unknown, source: Source): { tweets: TweetResult[]; next
   return { tweets, nextCursor }
 }
 
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+}
+
+type UrlEntity = { url?: string; expanded_url?: string }
+
+type StoredEntities = {
+  urls: Array<{ short: string; expanded: string }>
+  hashtags: string[]
+  mentions: string[]
+}
+
+const MAX_URL_RESOLVE_CONCURRENCY = 5
+let _activeUrlResolves = 0
+const _urlResolveQueue: Array<() => void> = []
+
+async function _withSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (_activeUrlResolves >= MAX_URL_RESOLVE_CONCURRENCY) {
+    await new Promise<void>((resolve) => _urlResolveQueue.push(resolve))
+  }
+  _activeUrlResolves++
+  try { return await fn() } finally {
+    _activeUrlResolves--
+    _urlResolveQueue.shift()?.()
+  }
+}
+
+async function _tryFetch(url: string, method: 'HEAD' | 'GET'): Promise<string | null> {
+  try {
+    const res = await fetch(url, { method, redirect: 'follow', signal: AbortSignal.timeout(5000) })
+    return res.ok ? (res.url || url) : null
+  } catch { return null }
+}
+
+async function resolveTco(url: string): Promise<string> {
+  if (!url || !/^https?:\/\/t\.co\//i.test(url)) return url
+  return _withSlot(async () => (await _tryFetch(url, 'HEAD')) ?? (await _tryFetch(url, 'GET')) ?? url)
+}
+
+async function extractEntities(tweet: TweetResult): Promise<StoredEntities> {
+  const hashtags = (tweet.legacy?.entities?.hashtags ?? [])
+    .map((h) => String((h as { text?: string })?.text ?? '').trim()).filter(Boolean)
+  const mentions = (tweet.legacy?.entities?.user_mentions ?? [])
+    .map((m) => String((m as { screen_name?: string })?.screen_name ?? '').trim()).filter(Boolean)
+  const urlsRaw = (tweet.legacy?.entities?.urls ?? [])
+    .map((u) => u as UrlEntity)
+    .map((u) => {
+      const short = String(u.url ?? '').trim()
+      const expanded = String(u.expanded_url ?? u.url ?? '').trim()
+      return short && expanded ? { short, expanded } : null
+    }).filter(Boolean) as Array<{ short: string; expanded: string }>
+
+  const urlsResolved = await Promise.all(
+    urlsRaw.map(async (u) => ({ short: u.short, expanded: await resolveTco(u.expanded) }))
+  )
+  const map = new Map<string, { short: string; expanded: string }>()
+  for (const u of urlsResolved) map.set(u.expanded, u)
+  return { urls: Array.from(map.values()), hashtags, mentions }
+}
+
 function bestVideoUrl(variants: MediaVariant[]): string | null {
   const mp4 = variants
     .filter((v) => v.content_type === 'video/mp4' && v.url)
@@ -185,7 +255,7 @@ function articleBlocksText(article: ArticleResult): string {
 
 function tweetFullText(tweet: TweetResult): string {
   if (tweet.note_tweet?.note_tweet_results?.result?.text) {
-    return tweet.note_tweet.note_tweet_results.result.text
+    return decodeHtmlEntities(tweet.note_tweet.note_tweet_results.result.text)
   }
   const article = tweet.article?.article_results?.result
   if (article) {
@@ -199,9 +269,9 @@ function tweetFullText(tweet: TweetResult): string {
       if (blocks) parts.push(blocks)
     }
 
-    if (parts.length > 0) return parts.join('\n\n')
+    if (parts.length > 0) return decodeHtmlEntities(parts.join('\n\n'))
   }
-  return tweet.legacy?.full_text ?? ''
+  return decodeHtmlEntities(tweet.legacy?.full_text ?? '')
 }
 
 function extractMedia(tweet: TweetResult) {
@@ -288,6 +358,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
               ? new Date(tweet.legacy.created_at)
               : null,
             rawJson: JSON.stringify(tweet),
+            entities: JSON.stringify(await extractEntities(tweet)),
             source,
           },
         })
