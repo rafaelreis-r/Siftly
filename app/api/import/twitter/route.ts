@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
+import { fetchUrlContent } from '@/lib/url-enricher'
 
 const BEARER = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I%2BxMb1nYFAA%3DUognEfK4ZPxYowpr4nMskopkC%2FDO'
 
@@ -409,7 +410,7 @@ export async function PATCH(): Promise<NextResponse> {
         ],
       },
       take: 200,
-      select: { id: true, rawJson: true },
+      select: { id: true, rawJson: true, text: true },
     })
 
     let updated = 0
@@ -418,10 +419,21 @@ export async function PATCH(): Promise<NextResponse> {
       if (!tweet) continue
 
       const entities = await extractAndResolveEntities(tweet)
+      const tweetText = decodeHtmlEntities(tweet.legacy?.full_text ?? '')
+      const storedText = bookmark.text.trim()
+      let nextText = tweetText
+
+      if ((storedText === '' || /^https?:\/\//i.test(storedText)) && entities.urls[0]?.expanded) {
+        const content = await fetchUrlContent(entities.urls[0].expanded)
+        if (content?.title) {
+          nextText = content.title
+        }
+      }
+
       await prisma.bookmark.update({
         where: { id: bookmark.id },
         data: {
-          text: decodeHtmlEntities(tweet.legacy?.full_text ?? ''),
+          text: nextText,
           entities: JSON.stringify(entities),
         },
       })

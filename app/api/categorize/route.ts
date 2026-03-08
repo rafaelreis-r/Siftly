@@ -17,6 +17,7 @@ import {
 } from '@/lib/vision-analyzer'
 import { backfillEntities } from '@/lib/rawjson-extractor'
 import { rebuildFts } from '@/lib/fts'
+import { fetchUrlContent } from '@/lib/url-enricher'
 
 type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel'
 
@@ -292,6 +293,18 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
             // Enrichment: generate semantic tags if not already done
             if (!bm.semanticTags) {
+              let entities: BookmarkForEnrichment['entities'] = undefined
+              let entityUrls: Array<string | { short?: string; expanded?: string }> = []
+              if (bm.entities) {
+                try {
+                  const parsed = JSON.parse(bm.entities) as Record<string, unknown>
+                  entities = parsed as BookmarkForEnrichment['entities']
+                  if (Array.isArray(parsed.urls)) {
+                    entityUrls = parsed.urls as Array<string | { short?: string; expanded?: string }>
+                  }
+                } catch { /* ignore */ }
+              }
+
               // Re-fetch image tags from DB after vision (or use initial fetch if no vision ran)
               const imageTags = anyVisionRan
                 ? (
@@ -306,19 +319,41 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                     .map((m) => m.imageTags)
                     .filter((t): t is string => t !== null && t !== '' && t !== '{}')
 
-              if (imageTags.length === 0 && bm.text.length < 20) {
+              let textForEnrichment = bm.text
+
+              if (imageTags.length === 0 && textForEnrichment.length < 20) {
+                const firstUrl = entityUrls[0]
+                const expandedUrl =
+                  typeof firstUrl === 'string'
+                    ? firstUrl
+                    : (firstUrl?.expanded ?? firstUrl?.short ?? '')
+
+                if (expandedUrl) {
+                  const content = await fetchUrlContent(expandedUrl)
+                  if (content) {
+                    textForEnrichment = [content.title, content.description]
+                      .map((part) => part.trim())
+                      .filter(Boolean)
+                      .join('. ')
+
+                    if (content.title && content.title !== bm.text) {
+                      await prisma.bookmark.update({
+                        where: { id: bm.id },
+                        data: { text: content.title },
+                      })
+                      bm.text = content.title
+                    }
+                  }
+                }
+              }
+
+              if (imageTags.length === 0 && textForEnrichment.length < 20) {
                 // Trivial bookmark — skip enrichment
                 await prisma.bookmark.update({ where: { id: bm.id }, data: { semanticTags: '[]' } })
               } else {
-                let entities: BookmarkForEnrichment['entities'] = undefined
-                if (bm.entities) {
-                  try {
-                    entities = JSON.parse(bm.entities) as BookmarkForEnrichment['entities']
-                  } catch { /* ignore */ }
-                }
                 try {
                   const results = await enrichBatchSemanticTags(
-                    [{ id: bm.id, text: bm.text, imageTags, entities }],
+                    [{ id: bm.id, text: textForEnrichment, imageTags, entities }],
                     client!,
                   )
                   const result = results[0]
