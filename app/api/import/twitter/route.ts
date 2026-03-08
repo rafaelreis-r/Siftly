@@ -414,6 +414,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     )
   }
 
+  // Auto-trigger categorization in the background if new bookmarks were imported
+  if (imported > 0) {
+    void fetch(new URL('/api/categorize', 'http://127.0.0.1:3000').href, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: false }),
+    }).catch(() => {/* best-effort, ignore errors */})
+  }
+
   return NextResponse.json({ imported, skipped })
 }
 
