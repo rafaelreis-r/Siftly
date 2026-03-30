@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
-import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
 import { analyzeBatch } from '@/lib/vision-analyzer'
-import { resolveAnthropicClient } from '@/lib/claude-cli-auth'
+import { AIClient, resolveAIClient } from '@/lib/ai-client'
+import { getProvider } from '@/lib/settings'
 
 // GET: returns progress stats
 export async function GET(): Promise<NextResponse> {
@@ -23,20 +23,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // use default
   }
 
-  const setting = await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } })
+  const provider = await getProvider()
+  const keyName = provider === 'openai' ? 'openaiApiKey' : 'anthropicApiKey'
+  const setting = await prisma.setting.findUnique({ where: { key: keyName } })
   const dbKey = setting?.value?.trim()
 
-  let client
+  let client: AIClient | null = null
   try {
-    client = resolveAnthropicClient({ dbKey })
+    client = await resolveAIClient({ dbKey })
   } catch {
-    return NextResponse.json({ error: 'No API key configured. Add your key in Settings or sign in to Claude CLI.' }, { status: 400 })
+    // SDK not available — will use CLI path for vision
   }
 
   return runAnalysis(client, batchSize)
 }
 
-async function runAnalysis(client: Anthropic, batchSize: number): Promise<NextResponse> {
+async function runAnalysis(client: AIClient | null, batchSize: number): Promise<NextResponse> {
   const untagged = await prisma.mediaItem.findMany({
     where: { imageTags: null, type: { in: ['photo', 'gif'] } },
     take: batchSize,

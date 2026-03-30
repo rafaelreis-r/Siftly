@@ -251,6 +251,42 @@ function convertConsoleExportRow(row: ConsoleExportBookmark): RawTweet {
   }
 }
 
+interface SiftlyExportItem {
+  tweetId?: string
+  text?: string
+  authorHandle?: string
+  authorName?: string
+  tweetCreatedAt?: string
+  mediaItems?: { type?: string; url?: string; thumbnailUrl?: string }[]
+  [key: string]: unknown
+}
+
+function isSiftlyExportFormat(item: unknown): item is SiftlyExportItem {
+  if (typeof item !== 'object' || item === null) return false
+  return 'tweetId' in item && 'text' in item
+}
+
+function convertSiftlyExportRow(row: SiftlyExportItem): RawTweet {
+  const mediaEntities: TwitterMediaEntity[] = (row.mediaItems ?? [])
+    .filter((m) => m.url)
+    .map((m) => {
+      const type = m.type === 'video' ? 'video' : m.type === 'gif' ? 'animated_gif' : 'photo'
+      if (type === 'video' || type === 'animated_gif') {
+        return { type, media_url_https: m.url, video_info: { variants: [{ content_type: 'video/mp4', bitrate: 0, url: m.url! }] } }
+      }
+      return { type, media_url_https: m.url }
+    })
+
+  return {
+    id_str: row.tweetId,
+    full_text: row.text,
+    created_at: row.tweetCreatedAt,
+    user: { screen_name: row.authorHandle || 'unknown', name: row.authorName || 'Unknown' },
+    entities: { media: mediaEntities.length > 0 ? mediaEntities : undefined },
+    extended_entities: mediaEntities.length > 0 ? { media: mediaEntities } : undefined,
+  }
+}
+
 function normalizeTweetArray(parsed: unknown): RawTweet[] {
   // Console script export format: { exportDate, totalBookmarks, bookmarks: [...] }
   if (isConsoleExportFormat(parsed)) {
@@ -260,6 +296,10 @@ function normalizeTweetArray(parsed: unknown): RawTweet[] {
   if (Array.isArray(parsed)) {
     if (parsed.length > 0 && isFlatExportFormat(parsed[0])) {
       return parsed.map((row) => convertFlatExportRow(row as FlatExportRow))
+    }
+    // Siftly re-export format: [{ tweetId, text, authorHandle, ... }]
+    if (parsed.length > 0 && isSiftlyExportFormat(parsed[0])) {
+      return parsed.map((row) => convertSiftlyExportRow(row as SiftlyExportItem))
     }
     return parsed as RawTweet[]
   }

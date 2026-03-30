@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
-import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
 import { ftsSearch } from '@/lib/fts'
-import { resolveAnthropicClient } from '@/lib/claude-cli-auth'
-import { getAnthropicModel } from '@/lib/settings'
+import { AIClient, resolveAIClient } from '@/lib/ai-client'
+import { getActiveModel, getProvider } from '@/lib/settings'
 import { extractKeywords } from '@/lib/search-utils'
+import { getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
+import { getCodexCliAvailability, codexPrompt } from '@/lib/codex-cli'
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 interface CacheEntry { results: unknown; expiresAt: number }
@@ -30,7 +31,9 @@ let _categoriesCacheExpiry = 0
 
 async function getDbApiKey(): Promise<string> {
   if (_apiKey !== null && Date.now() < _apiKeyExpiry) return _apiKey
-  const setting = await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } })
+  const provider = await getProvider()
+  const keyName = provider === 'openai' ? 'openaiApiKey' : 'anthropicApiKey'
+  const setting = await prisma.setting.findUnique({ where: { key: keyName } })
   const fromDb = setting?.value?.trim() ?? ''
   _apiKey = fromDb
   _apiKeyExpiry = Date.now() + 60_000
@@ -196,13 +199,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const cached = getCached(cacheKey)
   if (cached) return NextResponse.json(cached)
 
-  let client: Anthropic
+  let client: AIClient | null = null
   try {
-    client = resolveAnthropicClient({ dbKey: apiKey })
+    client = await resolveAIClient({ dbKey: apiKey })
   } catch {
-    return NextResponse.json({ error: 'No Anthropic API key configured. Add it in Settings or log in with Claude CLI.' }, { status: 400 })
+    // SDK not available — will try CLI path
   }
-  const model = await getAnthropicModel()
+  const model = await getActiveModel()
+  const provider = await getProvider()
 
   const categoryFilter = category
     ? { categories: { some: { category: { slug: category } } } }
@@ -337,23 +341,53 @@ Constraints:
 - Only return ids from the list above
 - reason must be specific, not generic ("shows bitcoin price crash chart" not "related to crypto")`
 
-  let aiResponse: { queryIntent?: string; matches: { id: string; score: number; reason: string }[]; explanation: string }
+  let aiResponse: { queryIntent?: string; matches: { id: string; score: number; reason: string }[]; explanation: string } = { matches: [], explanation: 'No results found.' }
 
-  try {
-    const msg = await client.messages.create({
-      model,
-      max_tokens: 1500,
-      messages: [{ role: 'user', content: prompt }],
-    })
-    const rawText = msg.content.find((b) => b.type === 'text')?.text ?? '{}'
+  const parseSearchResponse = (rawText: string): typeof aiResponse => {
     const jsonMatch = rawText.match(/\{[\s\S]*\}/)
-    aiResponse = jsonMatch
+    return jsonMatch
       ? (JSON.parse(jsonMatch[0]) as typeof aiResponse)
       : { matches: [], explanation: 'No results found.' }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    console.error('AI search error:', msg)
-    return NextResponse.json({ error: `AI search failed: ${msg}` }, { status: 500 })
+  }
+
+  // Try CLI first (works with ChatGPT OAuth), then fall back to SDK
+  let cliSucceeded = false
+  if (provider === 'openai' && await getCodexCliAvailability()) {
+    try {
+      const result = await codexPrompt(prompt, { timeoutMs: 90_000 })
+      if (result.success && result.data) {
+        aiResponse = parseSearchResponse(result.data)
+        cliSucceeded = true
+      }
+    } catch { /* fall through to SDK */ }
+  } else if (provider === 'anthropic' && await getCliAvailability()) {
+    try {
+      const cliModel = modelNameToCliAlias(model)
+      const result = await claudePrompt(prompt, { model: cliModel, timeoutMs: 90_000 })
+      if (result.success && result.data) {
+        aiResponse = parseSearchResponse(result.data)
+        cliSucceeded = true
+      }
+    } catch { /* fall through to SDK */ }
+  }
+
+  if (!cliSucceeded) {
+    if (!client) {
+      return NextResponse.json({ error: 'No CLI available and no API key configured. Add an API key in Settings or install Codex/Claude CLI.' }, { status: 400 })
+    }
+    try {
+      const response = await client.createMessage({
+        model,
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }],
+      })
+      const rawText = response.text ?? '{}'
+      aiResponse = parseSearchResponse(rawText)
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      console.error('AI search error:', errMsg)
+      return NextResponse.json({ error: `AI search failed: ${errMsg}` }, { status: 500 })
+    }
   }
 
   // ── Step 4: Hydrate results ────────────────────────────────────────────────

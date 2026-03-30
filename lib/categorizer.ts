@@ -1,8 +1,9 @@
-import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
 import { buildImageContext } from '@/lib/image-context'
-import { resolveAnthropicClient, getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
-import { getAnthropicModel } from '@/lib/settings'
+import { getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
+import { getCodexCliAvailability, codexPrompt } from '@/lib/codex-cli'
+import { getActiveModel, getProvider } from '@/lib/settings'
+import { AIClient, resolveAIClient } from '@/lib/ai-client'
 
 const BATCH_SIZE = 20
 
@@ -209,7 +210,7 @@ ${JSON.stringify(tweetData, null, 1)}`
 
 function parseCategorizationResponse(text: string, validSlugs: Set<string>): CategorizationResult[] {
   const jsonMatch = text.match(/\[[\s\S]*\]/)
-  if (!jsonMatch) throw new Error('No JSON array found in Claude response')
+  if (!jsonMatch) throw new Error('No JSON array found in AI response')
 
   const parsed: unknown = JSON.parse(jsonMatch[0])
   if (!Array.isArray(parsed)) throw new Error('Claude response is not an array')
@@ -231,47 +232,62 @@ function parseCategorizationResponse(text: string, validSlugs: Set<string>): Cat
 
 export async function categorizeBatch(
   bookmarks: BookmarkForCategorization[],
-  client: Anthropic | null,
+  client: AIClient | null,
   categoryDescriptions: Record<string, string> = {},
   allSlugs: string[] = DEFAULT_SLUGS,
 ): Promise<CategorizationResult[]> {
   if (bookmarks.length === 0) return []
 
   const prompt = buildCategorizationPrompt(bookmarks, categoryDescriptions, allSlugs)
+  const provider = await getProvider()
 
   // Prefer CLI over SDK (avoids OAuth token extraction, uses CLI directly)
-  if (await getCliAvailability()) {
-    const modelSetting = await getAnthropicModel()
-    const cliModel = modelNameToCliAlias(modelSetting)
-
-    const result = await claudePrompt(prompt, { model: cliModel, timeoutMs: 60_000 })
-    if (result.success && result.data) {
-      try {
-        return parseCategorizationResponse(result.data, new Set(allSlugs))
-      } catch (parseErr) {
-        console.warn('[categorize] CLI response parse failed, falling back to SDK:', parseErr)
+  if (provider === 'openai') {
+    if (await getCodexCliAvailability()) {
+      const result = await codexPrompt(prompt, { timeoutMs: 60_000 })
+      if (result.success && result.data) {
+        try {
+          return parseCategorizationResponse(result.data, new Set(allSlugs))
+        } catch (parseErr) {
+          console.warn('[categorize] Codex CLI response parse failed, falling back to SDK:', parseErr)
+        }
+      } else {
+        console.warn('[categorize] Codex CLI failed, falling back to SDK:', result.error)
       }
-    } else {
-      console.warn('[categorize] CLI failed, falling back to SDK:', result.error)
+    }
+  } else {
+    if (await getCliAvailability()) {
+      const model = await getActiveModel()
+      const cliModel = modelNameToCliAlias(model)
+
+      const result = await claudePrompt(prompt, { model: cliModel, timeoutMs: 60_000 })
+      if (result.success && result.data) {
+        try {
+          return parseCategorizationResponse(result.data, new Set(allSlugs))
+        } catch (parseErr) {
+          console.warn('[categorize] CLI response parse failed, falling back to SDK:', parseErr)
+        }
+      } else {
+        console.warn('[categorize] CLI failed, falling back to SDK:', result.error)
+      }
     }
   }
 
   // Fallback to SDK (requires API key)
   if (!client) {
-    throw new Error('Claude CLI not available and no API key configured.')
+    throw new Error('No CLI available and no API key configured.')
   }
 
-  const model = await getAnthropicModel()
-  const message = await client.messages.create({
+  const model = await getActiveModel()
+  const response = await client.createMessage({
     model,
     max_tokens: 2048,
     messages: [{ role: 'user', content: prompt }],
   })
 
-  const textBlock = message.content.find((b) => b.type === 'text')
-  if (!textBlock || textBlock.type !== 'text') throw new Error('No text content in Claude response')
+  if (!response.text) throw new Error('No text content in AI response')
 
-  return parseCategorizationResponse(textBlock.text, new Set(allSlugs))
+  return parseCategorizationResponse(response.text, new Set(allSlugs))
 }
 
 export async function writeCategoryResults(results: CategorizationResult[]): Promise<void> {
@@ -382,8 +398,15 @@ export async function categorizeAll(
   await seedDefaultCategories()
 
   // Resolve auth once — avoids re-resolving inside every batch call
-  const apiKeySetting = await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } })
-  const client = resolveAnthropicClient({ dbKey: apiKeySetting?.value })
+  const provider = await getProvider()
+  const keyName = provider === 'openai' ? 'openaiApiKey' : 'anthropicApiKey'
+  const apiKeySetting = await prisma.setting.findUnique({ where: { key: keyName } })
+  let client: AIClient | null = null
+  try {
+    client = await resolveAIClient({ dbKey: apiKeySetting?.value })
+  } catch {
+    // CLI might still work — client stays null
+  }
 
   // Load ALL categories (default + custom) for the prompt
   const dbCategories = await prisma.category.findMany({ select: { slug: true, name: true, description: true } })

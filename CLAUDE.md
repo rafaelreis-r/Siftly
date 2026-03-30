@@ -1,27 +1,22 @@
-# Siftly — Claude Code Guide
+# Siftly
 
 Self-hosted Twitter/X bookmark manager with AI-powered categorization, search, and visualization.
 
 ## Quick Setup
 
 ```bash
-# Install dependencies
+./start.sh            # installs deps, sets up DB, opens browser
+```
+
+Or manually:
+
+```bash
 npm install
-
-# Generate Prisma client + create local SQLite database
-npx prisma generate
-npx prisma db push
-
-# Start the dev server
+npx prisma generate && npx prisma db push
 npx next dev
 ```
 
 App runs at **http://localhost:3000**
-
-For a single command that does all of the above and opens the browser automatically:
-```bash
-./start.sh
-```
 
 ## AI Authentication — No API Key Needed
 
@@ -89,13 +84,7 @@ prisma/schema.prisma  # SQLite schema (Bookmark, Category, MediaItem, Setting, I
 
 ## Environment Variables
 
-Only `DATABASE_URL` is required. Everything else is optional:
-
-```env
-DATABASE_URL="file:./prisma/dev.db"       # required — set by default in .env
-ANTHROPIC_API_KEY=sk-ant-...              # optional if Claude CLI is signed in
-ANTHROPIC_BASE_URL=http://localhost:8080  # optional — for local proxies
-```
+See `.env.example` for the full list. Only `DATABASE_URL` is required (defaults to `file:./prisma/dev.db`).
 
 ## CLI for AI Agents
 
@@ -113,45 +102,16 @@ npm run siftly -- stats                              # Alternative via npm scrip
 
 ## Common Tasks
 
-### Run the AI pipeline manually
-POST to `/api/categorize` with `{}` body. Monitor progress via GET `/api/categorize` (returns SSE stream).
-
-### Add a new bookmark category
-Edit `DEFAULT_CATEGORIES` array in `lib/categorizer.ts`. Add name, slug, hex color, and description. The description text is passed verbatim to Claude — be specific.
-
-### Add a known tool for entity extraction
-Append a domain string to `KNOWN_TOOL_DOMAINS` in `lib/rawjson-extractor.ts`.
-
-### Test API auth
-```bash
-curl -X POST http://localhost:3000/api/settings/test \
-  -H "Content-Type: application/json" \
-  -d '{"provider":"anthropic"}'
-# Returns: {"working": true}
-```
-
-### Check Claude CLI auth status
-```bash
-curl http://localhost:3000/api/settings/cli-status
-# Returns: {"available": true, "subscriptionType": "max", "expired": false}
-```
+| Task | How |
+|------|-----|
+| Run AI pipeline | `POST /api/categorize` with `{}` body; `GET /api/categorize` for SSE progress |
+| Add category | Edit `DEFAULT_CATEGORIES` in `lib/categorizer.ts` — description is passed verbatim to Claude |
+| Add known tool | Append domain to `KNOWN_TOOL_DOMAINS` in `lib/rawjson-extractor.ts` |
+| Test API auth | `POST /api/settings/test` with `{"provider":"anthropic"}` |
+| Check CLI auth | `GET /api/settings/cli-status` |
 
 ## Database
 
-SQLite file at `prisma/dev.db`. Schema models:
+SQLite at `prisma/dev.db`. After schema changes: `npx prisma db push`
 
-- `Bookmark` — tweet text, author, raw JSON, semantic tags, enrichment metadata
-- `MediaItem` — images/videos/GIFs with AI visual tags
-- `BookmarkCategory` — bookmark↔category with confidence score (0–1)
-- `Category` — name, slug, color, AI description
-- `Setting` — key/value store (API keys, model choice)
-- `ImportJob` — import file tracking
-
-After schema changes: `npx prisma db push`
-
-## Privacy
-
-- **NEVER** use the name "Layth Kal" or any variation (Layth, Kal, laythkal, etc.) in commits, code, comments, documentation, or any file in this repository.
-- Always use **"Viperr"** or **"viperrcrypto"** as the author/maintainer identity.
-- Always use `viperrcrypto@users.noreply.github.com` as the commit email.
-- X/Twitter handle is **@viperr** (not @viperrcrypto).
+Models: `Bookmark`, `MediaItem`, `BookmarkCategory`, `Category`, `Setting`, `ImportJob` — see `prisma/schema.prisma` for details.

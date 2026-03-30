@@ -126,7 +126,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   return NextResponse.json({
     jobId: importJob.id,
-    count: importedCount,
+    imported: importedCount,
     skipped: skippedCount,
+    parsed: parsedBookmarks.length,
   })
 }

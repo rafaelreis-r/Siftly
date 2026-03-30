@@ -28,28 +28,29 @@ interface LinkPreviewData {
 // Module-level cache: url → preview data (or null on error)
 const previewCache = new Map<string, LinkPreviewData | null>()
 
-function LinkPreview({ url }: { url: string }) {
-  const [data, setData] = useState<LinkPreviewData | null | 'loading'>(() => {
-    if (!previewCache.has(url)) return 'loading'
-    return previewCache.get(url) ?? null
-  })
+function LinkPreview({ url, tweetUrl, tweetId, prominent = false }: { url: string; tweetUrl: string; tweetId?: string; prominent?: boolean }) {
+  const [data, setData] = useState<LinkPreviewData | null | 'loading'>('loading')
 
   useEffect(() => {
-    if (previewCache.has(url)) return
+    const cacheKey = tweetId ? `${url}:${tweetId}` : url
+    if (previewCache.has(cacheKey)) {
+      setData(previewCache.get(cacheKey) ?? null)
+      return
+    }
     let cancelled = false
-    fetch(`/api/link-preview?url=${encodeURIComponent(url)}`)
+    fetch(`/api/link-preview?url=${encodeURIComponent(url)}${tweetId ? `&tweetId=${tweetId}` : ''}`)
       .then((r) => r.json())
       .then((d: LinkPreviewData & { error?: string }) => {
         if (cancelled) return
         const result = d.error || !d.title ? null : d
-        previewCache.set(url, result)
+        previewCache.set(cacheKey, result)
         setData(result)
       })
       .catch(() => {
-        if (!cancelled) { previewCache.set(url, null); setData(null) }
+        if (!cancelled) { previewCache.set(cacheKey, null); setData(null) }
       })
     return () => { cancelled = true }
-  }, [url])
+  }, [url, tweetId])
 
   if (data === 'loading') {
     return (
@@ -61,11 +62,11 @@ function LinkPreview({ url }: { url: string }) {
   if (!data) {
     return (
       <a
-        href={url}
+        href={tweetUrl}
         target="_blank"
         rel="noopener noreferrer"
         onClick={(e) => e.stopPropagation()}
-        className="mt-2 inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-zinc-800 bg-zinc-800/40 hover:border-zinc-700 hover:bg-zinc-800/70 transition-all text-xs text-zinc-400 hover:text-zinc-200 max-w-full overflow-hidden"
+        className={`${prominent ? 'mt-1' : 'mt-2'} inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-zinc-800 bg-zinc-800/40 hover:border-zinc-700 hover:bg-zinc-800/70 transition-all text-xs text-zinc-400 hover:text-zinc-200 max-w-full overflow-hidden`}
       >
         <Globe size={11} className="shrink-0 text-zinc-600" />
         <span className="truncate">{url.replace(/^https?:\/\//, '')}</span>
@@ -74,7 +75,76 @@ function LinkPreview({ url }: { url: string }) {
     )
   }
 
+  // X article pages return useless OG data — show a styled "View article" card instead
+  const isGenericXArticle = (data.domain === 'x.com' || data.domain === 'twitter.com') && !data.image && !data.description
+
   const href = data.url || url
+
+  // X article / generic X link with no useful OG data — show a clean "View on X" card
+  if (isGenericXArticle) {
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        className={`${prominent ? 'mt-1' : 'mt-2'} flex items-center gap-3 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-800/40 hover:border-zinc-700 hover:bg-zinc-800/70 transition-all group/link px-4 py-3`}
+      >
+        <div className="w-10 h-10 rounded-lg bg-zinc-700/60 flex items-center justify-center shrink-0">
+          <svg viewBox="0 0 24 24" className="w-5 h-5 text-zinc-400" fill="currentColor">
+            <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+          </svg>
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-zinc-200 group-hover/link:text-white transition-colors">
+            {data.title?.includes('Article') ? 'View Article on X' : data.title || 'View on X'}
+          </p>
+          <p className="text-xs text-zinc-500 truncate">{data.domain}{data.url ? new URL(data.url).pathname : ''}</p>
+        </div>
+        <ExternalLink size={14} className="text-zinc-600 group-hover/link:text-zinc-400 transition-colors shrink-0" />
+      </a>
+    )
+  }
+
+  // Prominent mode: vertical layout with large image — used for link-only bookmarks
+  if (prominent) {
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        className="mt-1 flex flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-800/40 hover:border-zinc-700 hover:bg-zinc-800/70 transition-all group/link"
+      >
+        {data.image && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={data.image}
+            alt=""
+            className="w-full h-40 object-cover border-b border-zinc-800"
+            loading="lazy"
+            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+          />
+        )}
+        <div className="flex flex-col px-3 py-2.5 min-w-0 gap-1">
+          <p className="text-sm font-semibold text-zinc-200 line-clamp-2 group-hover/link:text-white transition-colors leading-snug">
+            {data.title}
+          </p>
+          {data.description && (
+            <p className="text-xs text-zinc-400 line-clamp-3 leading-relaxed">
+              {data.description}
+            </p>
+          )}
+          <div className="flex items-center gap-1 mt-0.5">
+            <Globe size={10} className="text-zinc-600 shrink-0" />
+            <span className="text-[10px] text-zinc-600 truncate">
+              {data.siteName || data.domain}
+            </span>
+          </div>
+        </div>
+      </a>
+    )
+  }
 
   return (
     <a
@@ -214,6 +284,20 @@ function isVideoUrl(url: string): boolean {
   return url.includes('video.twimg.com') || url.includes('.mp4')
 }
 
+/** Derive a thumbnail URL from a Twitter video URL */
+function deriveVideoThumb(url: string): string | null {
+  // amplify_video/{id}/vid/... → pbs.twimg.com/amplify_video_thumb/{id}/img/default.jpg
+  const amplify = url.match(/video\.twimg\.com\/amplify_video\/(\d+)/)
+  if (amplify) return `https://pbs.twimg.com/amplify_video_thumb/${amplify[1]}/img/default.jpg`
+  // ext_tw_video/{id}/pu/vid/... → pbs.twimg.com/ext_tw_video_thumb/{id}/pu/img/default.jpg
+  const ext = url.match(/video\.twimg\.com\/ext_tw_video\/(\d+)/)
+  if (ext) return `https://pbs.twimg.com/ext_tw_video_thumb/${ext[1]}/pu/img/default.jpg`
+  // tweet_video/{id}.mp4 → pbs.twimg.com/tweet_video_thumb/{id}.jpg
+  const tweet = url.match(/video\.twimg\.com\/tweet_video\/([^.]+)\.mp4/)
+  if (tweet) return `https://pbs.twimg.com/tweet_video_thumb/${tweet[1]}.jpg`
+  return null
+}
+
 interface TopMediaSlotProps {
   item: BookmarkWithMedia['mediaItems'][number]
   tweetUrl: string
@@ -292,7 +376,7 @@ function TopMediaSlot({ item, tweetUrl }: TopMediaSlotProps) {
   // Guard: thumbnailUrl that is itself a video URL is not usable as an <img>
   const rawThumb = item.thumbnailUrl ?? null
   const thumb = rawThumb && !isVideoUrl(rawThumb) ? rawThumb
-    : (!isVideoUrl(item.url) ? item.url : null)
+    : (!isVideoUrl(item.url) ? item.url : deriveVideoThumb(item.url))
 
   return (
     <a href={tweetUrl} target="_blank" rel="noopener noreferrer" className="relative block" onClick={(e) => e.stopPropagation()}>
@@ -431,7 +515,7 @@ function CategoryEditor({ bookmarkId, currentCategoryIds, onSave, onClose }: Cat
   return (
     <div
       ref={editorRef}
-      className="absolute left-0 right-0 top-full z-50 mt-2 rounded-xl border border-zinc-700 bg-zinc-900 p-3 shadow-2xl shadow-black/50 sm:left-auto sm:min-w-[18rem]"
+      className="absolute left-0 right-0 bottom-full mb-2 z-50 bg-zinc-900 border border-zinc-700 rounded-xl p-3 shadow-2xl shadow-black/50 sm:left-auto sm:min-w-[18rem]"
       onClick={(e) => e.stopPropagation()}
     >
       <p className="text-xs font-semibold text-zinc-500 mb-2 uppercase tracking-wide">Edit categories</p>
@@ -555,11 +639,11 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
     (firstMedia.type === 'photo' || isVideoUrl(firstMedia.url))
 
   return (
-    <div className="group relative bg-zinc-900 border border-zinc-800 rounded-2xl hover:border-zinc-700 hover:shadow-xl hover:shadow-black/30 transition-all duration-200 overflow-hidden flex flex-col flex-1">
+    <div className="group relative bg-zinc-900 border border-zinc-800 rounded-2xl hover:border-zinc-700 hover:shadow-xl hover:shadow-black/30 transition-all duration-200 flex flex-col flex-1">
 
       {/* Top media — full bleed, no padding */}
       {firstMedia && (
-        <div className="border-b border-zinc-800/60 flex-shrink-0">
+        <div className="border-b border-zinc-800/60 rounded-t-2xl overflow-hidden shrink-0">
           <TopMediaSlot item={firstMedia} tweetUrl={tweetUrl} />
         </div>
       )}
@@ -641,7 +725,7 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
             <p className="text-xs text-zinc-700 italic">No text content</p>
           )}
           {previewUrl && (
-            <LinkPreview key={previewUrl} url={previewUrl} />
+            <LinkPreview key={previewUrl} url={previewUrl} tweetUrl={tweetUrl} tweetId={bookmark.tweetId} prominent={!displayText} />
           )}
         </div>
 

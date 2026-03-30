@@ -15,9 +15,6 @@ import {
   ChevronRight,
   Command,
   Bookmark,
-  Copy,
-  Check,
-  Coffee,
   Menu,
   X,
 } from 'lucide-react'
@@ -37,8 +34,39 @@ const NAV_ITEMS: NavItem[] = [
   { href: '/settings', label: 'Settings', icon: Settings },
 ]
 
-const DONATION_ADDRESS = '0xcF10B967a9e422753812004Cd59990f62E360760'
 const BUILDER_X = 'https://x.com/viperr'
+
+function SponsorFooter({ className }: { className?: string }) {
+  return (
+    <div className={`mx-3 mt-auto mb-3 pt-3 border-t border-zinc-800/50 space-y-2 ${className ?? ''}`}>
+      {/* Builder credit */}
+      <a
+        href={BUILDER_X}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex items-center gap-2 px-2 py-1.5 rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 transition-all"
+      >
+        <span className="text-[13px]">&#x1D54F;</span>
+        <span className="text-[11px] font-medium">Built by @viperr</span>
+      </a>
+
+      {/* Sponsor spot */}
+      <a
+        href={BUILDER_X}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex items-center gap-2.5 px-2.5 py-2 rounded-xl bg-zinc-800/40 border border-zinc-700/30 hover:border-zinc-600/50 hover:bg-zinc-800/60 transition-all group"
+      >
+        <div className="w-7 h-7 rounded-full bg-zinc-700/50 border border-zinc-600/30 shrink-0" />
+        <div className="flex flex-col min-w-0">
+          <span className="text-[11px] font-medium text-zinc-400 group-hover:text-zinc-300 transition-colors leading-tight">Support Siftly by sponsoring your logo here</span>
+          <span className="text-[10px] text-zinc-600 leading-tight mt-1">DM @viperr on X</span>
+        </div>
+      </a>
+    </div>
+  )
+}
+
 
 interface CategoryItem {
   name: string
@@ -67,53 +95,6 @@ function isActive(pathname: string, href: string): boolean {
   return pathname.startsWith(href)
 }
 
-function SupportFooter({ className }: { className?: string }) {
-  const [copied, setCopied] = useState(false)
-
-  function copyAddress() {
-    void navigator.clipboard.writeText(DONATION_ADDRESS).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    })
-  }
-
-  return (
-    <div className={`mx-3 mt-auto mb-3 border-t border-zinc-800/50 pt-3 ${className ?? ''}`}>
-      <a
-        href={BUILDER_X}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="mb-1 flex items-center gap-2 rounded-lg px-2 py-1.5 text-zinc-500 transition-all hover:bg-zinc-800/50 hover:text-zinc-300 group"
-      >
-        <span className="text-[13px]">𝕏</span>
-        <span className="text-[11px] font-medium">Built by @viperr</span>
-      </a>
-
-      <div className="rounded-xl border border-zinc-700/30 bg-zinc-800/40 p-3">
-        <div className="mb-2 flex items-center gap-1.5">
-          <Coffee size={12} className="shrink-0 text-amber-400" />
-          <span className="text-[11px] font-semibold text-zinc-300">Support Siftly</span>
-        </div>
-        <p className="mb-2 text-[10px] leading-relaxed text-zinc-600">
-          If Siftly saves you time, consider leaving a tip ☕
-        </p>
-        <button
-          onClick={copyAddress}
-          title="Copy ETH address"
-          className="group flex w-full items-center justify-between gap-1.5 rounded-lg border border-zinc-700/40 bg-zinc-900/80 px-2 py-1.5 transition-all hover:border-amber-500/40 hover:bg-zinc-900"
-        >
-          <span className="truncate text-[9.5px] font-mono text-zinc-500 transition-colors group-hover:text-zinc-300">
-            {DONATION_ADDRESS.slice(0, 10)}…{DONATION_ADDRESS.slice(-6)}
-          </span>
-          {copied
-            ? <Check size={11} className="shrink-0 text-emerald-400" />
-            : <Copy size={11} className="shrink-0 text-zinc-600 transition-colors group-hover:text-amber-400" />
-          }
-        </button>
-      </div>
-    </div>
-  )
-}
 
 function NavContent({
   pathname,
@@ -302,7 +283,7 @@ export default function Nav() {
   const pathname = usePathname()
   const [categories, setCategories] = useState<CategoryItem[]>([])
   const [totalBookmarks, setTotalBookmarks] = useState<number | null>(null)
-  const [showAllCats, setShowAllCats] = useState(false)
+  const [showAllCats, setShowAllCats] = useState(true)
   const [collectionsOpen, setCollectionsOpen] = useState(() => {
     if (typeof window === 'undefined') return true
     return localStorage.getItem('nav-collections-open') !== 'false'
@@ -406,7 +387,7 @@ export default function Nav() {
 
       <aside className="sticky top-0 hidden h-screen w-[228px] shrink-0 flex-col overflow-y-auto border-r border-zinc-800/50 bg-zinc-900 lg:flex">
         <NavContent {...commonProps} onNavigate={() => {}} />
-        <SupportFooter />
+        <SponsorFooter />
       </aside>
 
       {mobileOpen && (
@@ -435,7 +416,7 @@ export default function Nav() {
               </button>
             </div>
             <NavContent {...commonProps} onNavigate={() => setMobileOpen(false)} mobile />
-            <SupportFooter className="pb-safe" />
+            <SponsorFooter className="pb-safe" />
           </aside>
         </div>
       )}

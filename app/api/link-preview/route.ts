@@ -66,6 +66,69 @@ function decodeHtmlEntities(str: string): string {
     .replace(/&apos;/g, "'")
 }
 
+/** Try to fetch rich data from Twitter's syndication API (articles, cards, etc.) */
+async function fetchXArticlePreview(tweetId: string): Promise<{
+  title: string; description: string; image: string; siteName: string; domain: string; url: string
+} | null> {
+  try {
+    const res = await fetch(
+      `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&token=x`,
+      { headers: { 'User-Agent': BROWSER_UA }, signal: AbortSignal.timeout(8000) },
+    )
+    if (!res.ok) return null
+    const data = await res.json() as {
+      article?: {
+        rest_id?: string
+        title?: string
+        preview_text?: string
+        cover_media?: { media_info?: { original_img_url?: string } }
+      }
+      card?: {
+        name?: string
+        binding_values?: Record<string, { string_value?: string; image_value?: { url?: string } }>
+      }
+      user?: { name?: string; screen_name?: string; profile_image_url_https?: string }
+    }
+
+    // X Article (native long-form posts)
+    if (data.article?.title) {
+      const articleId = data.article.rest_id || tweetId
+      return {
+        title: data.article.title,
+        description: data.article.preview_text || '',
+        image: data.article.cover_media?.media_info?.original_img_url || '',
+        siteName: data.user?.name || 'X',
+        domain: 'x.com',
+        url: `https://x.com/i/article/${articleId}`,
+      }
+    }
+
+    // Twitter Card (link previews embedded in tweets)
+    if (data.card?.binding_values) {
+      const bv = data.card.binding_values
+      const cardTitle = bv.title?.string_value
+      if (cardTitle) {
+        return {
+          title: cardTitle,
+          description: bv.description?.string_value || '',
+          image: bv.thumbnail_image_original?.image_value?.url
+            || bv.thumbnail_image?.image_value?.url
+            || bv.summary_photo_image_original?.image_value?.url
+            || bv.summary_photo_image?.image_value?.url
+            || '',
+          siteName: bv.vanity_url?.string_value || data.user?.name || 'X',
+          domain: bv.domain?.string_value || 'x.com',
+          url: bv.card_url?.string_value || bv.url?.string_value || `https://x.com/i/status/${tweetId}`,
+        }
+      }
+    }
+
+    return null
+  } catch {
+    return null
+  }
+}
+
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const url = request.nextUrl.searchParams.get('url')
   if (!url) {
@@ -75,6 +138,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (isPrivateUrl(url)) {
     return NextResponse.json({ error: 'Invalid URL' }, { status: 400 })
   }
+
+  // Also accept an optional tweetId param for X article enrichment
+  const rawTweetId = request.nextUrl.searchParams.get('tweetId')
+  const tweetId = rawTweetId && /^\d+$/.test(rawTweetId) ? rawTweetId : null
 
   try {
     const res = await fetch(url, {
@@ -90,6 +157,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     if (!res.ok) {
       return NextResponse.json({ error: `HTTP ${res.status}` }, { status: 502 })
+    }
+
+    // SSRF: re-check the final URL after redirects to prevent open-redirect chaining into private networks
+    if (isPrivateUrl(res.url)) {
+      return NextResponse.json({ error: 'Invalid URL' }, { status: 400 })
     }
 
     // Only read first 50KB — enough for head tags
@@ -125,6 +197,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       try { return new URL(finalUrl).hostname.replace(/^www\./, '') } catch { return '' }
     })()
 
+    const isXDomain = domain === 'x.com' || domain === 'twitter.com'
+
+    // X article pages (and many X URLs) are JS-rendered — OG scraping returns
+    // nothing useful. Try the syndication API first for any X URL when we have a tweetId.
+    if (isXDomain && tweetId) {
+      const articleData = await fetchXArticlePreview(tweetId)
+      if (articleData) {
+        return NextResponse.json(articleData, { headers: CACHE_HEADERS })
+      }
+    }
+
     const title = extractMeta(
       html,
       /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i,
@@ -153,6 +236,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       /<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']+)["']/i,
       /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:site_name["']/i,
     )
+
+    // If OG scrape returned poor results for an X URL, try syndication as fallback
+    if (isXDomain && tweetId && !image && (!title || /^(Article on X|View on X|post \/ X|X)$/i.test(title))) {
+      const articleData = await fetchXArticlePreview(tweetId)
+      if (articleData) {
+        return NextResponse.json(articleData, { headers: CACHE_HEADERS })
+      }
+    }
 
     const resolvedTitle = title || syntheticTitle(finalUrl, siteName)
 

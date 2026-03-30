@@ -1,10 +1,11 @@
-import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
 import { buildImageContext } from '@/lib/image-context'
 import { getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
-import { getAnthropicModel } from '@/lib/settings'
+import { getCodexCliAvailability, codexPrompt } from '@/lib/codex-cli'
+import { getActiveModel, getProvider } from '@/lib/settings'
+import { AIClient } from '@/lib/ai-client'
 
-export { getAnthropicModel } from '@/lib/settings'
+export { getActiveModel } from '@/lib/settings'
 
 type AllowedMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
 
@@ -69,17 +70,52 @@ Rules:
 const RETRY_DELAYS_MS = [1500, 4000, 10000]
 const CONCURRENCY = 12
 
+/**
+ * CLI-based vision analysis: passes the image URL in the prompt text.
+ * Works with Codex CLI (ChatGPT OAuth) and Claude CLI without needing SDK access.
+ */
+async function analyzeImageViaCli(imageUrl: string): Promise<string> {
+  const provider = await getProvider()
+  // Sanitize URL: strip control characters and newlines to prevent prompt injection
+  const safeUrl = imageUrl.replace(/[\r\n\t]/g, '').trim()
+  if (!safeUrl.startsWith('http://') && !safeUrl.startsWith('https://')) return ''
+  const urlPrompt = `Look at this image URL and analyze it: ${safeUrl}\n\n${ANALYSIS_PROMPT}`
+
+  if (provider === 'openai') {
+    if (!(await getCodexCliAvailability())) return ''
+    const result = await codexPrompt(urlPrompt, { timeoutMs: 60_000 })
+    if (!result.success || !result.data) return ''
+    const jsonMatch = result.data.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) return ''
+    try { JSON.parse(jsonMatch[0]); return jsonMatch[0] } catch { return '' }
+  } else {
+    if (!(await getCliAvailability())) return ''
+    const model = await getActiveModel()
+    const cliModel = modelNameToCliAlias(model)
+    const result = await claudePrompt(urlPrompt, { model: cliModel, timeoutMs: 60_000 })
+    if (!result.success || !result.data) return ''
+    const jsonMatch = result.data.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) return ''
+    try { JSON.parse(jsonMatch[0]); return jsonMatch[0] } catch { return '' }
+  }
+}
+
 async function analyzeImageWithRetry(
   url: string,
-  client: Anthropic,
+  client: AIClient | null,
   model: string,
   attempt = 0,
 ): Promise<string> {
+  // If no SDK client, use CLI path with image URL
+  if (!client) {
+    return attempt === 0 ? analyzeImageViaCli(url) : ''
+  }
+
   const img = await fetchImageAsBase64(url)
   if (!img) return ''
 
   try {
-    const msg = await client.messages.create({
+    const response = await client.createMessage({
       model,
       max_tokens: 700,
       messages: [
@@ -92,7 +128,7 @@ async function analyzeImageWithRetry(
         },
       ],
     })
-    const raw = msg.content.find((b) => b.type === 'text')?.text?.trim() ?? ''
+    const raw = response.text?.trim() ?? ''
     if (!raw) return ''
 
     // Validate it's parseable JSON
@@ -101,26 +137,25 @@ async function analyzeImageWithRetry(
     JSON.parse(jsonMatch[0]) // throws if invalid
     return jsonMatch[0]
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
+    const errMsg = err instanceof Error ? err.message : String(err)
     // Never retry client errors (4xx) — bad request, invalid image, too large, etc.
-    const isClientError = msg.includes('400') || msg.includes('401') || msg.includes('403') || msg.includes('422')
+    const isClientError = errMsg.includes('400') || errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('422')
     const isRetryable =
       !isClientError && (
-        msg.includes('rate') ||
-        msg.includes('529') ||
-        msg.includes('overloaded') ||
-        msg.includes('ECONNREFUSED') ||
-        msg.includes('ETIMEDOUT') ||
-        msg.includes('fetch') ||
-        msg.includes('network') ||
-        msg.includes('500') ||
-        msg.includes('502') ||
-        msg.includes('503')
+        errMsg.includes('rate') ||
+        errMsg.includes('529') ||
+        errMsg.includes('overloaded') ||
+        errMsg.includes('ECONNREFUSED') ||
+        errMsg.includes('ETIMEDOUT') ||
+        errMsg.includes('fetch') ||
+        errMsg.includes('network') ||
+        errMsg.includes('500') ||
+        errMsg.includes('502') ||
+        errMsg.includes('503')
       )
 
     if (attempt === 0) {
-      // Log first failure per item so server console shows what's wrong
-      console.warn(`[vision] analysis failed (attempt ${attempt + 1}): ${msg.slice(0, 120)}`)
+      console.warn(`[vision] analysis failed (attempt ${attempt + 1}): ${errMsg.slice(0, 120)}`)
     }
 
     if (isRetryable && attempt < RETRY_DELAYS_MS.length) {
@@ -152,7 +187,7 @@ async function getCachedAnalysis(imageUrl: string, excludeId: string): Promise<s
 
 export async function analyzeItem(
   item: MediaItemForAnalysis,
-  client: Anthropic,
+  client: AIClient | null,
   model: string,
 ): Promise<number> {
   const imageUrl = item.type === 'video' ? (item.thumbnailUrl ?? item.url) : item.url
@@ -204,14 +239,14 @@ export async function runWithConcurrency<T>(
 
 export async function analyzeBatch(
   items: MediaItemForAnalysis[],
-  client: Anthropic,
+  client: AIClient | null,
   onProgress?: (delta: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
   const analyzable = items.filter((m) => m.type === 'photo' || m.type === 'gif' || m.type === 'video')
   if (analyzable.length === 0) return 0
 
-  const model = await getAnthropicModel()
+  const model = await getActiveModel()
 
   const tasks = analyzable.map((item) => async () => {
     if (shouldAbort?.()) return 0
@@ -224,7 +259,7 @@ export async function analyzeBatch(
   return results.reduce((sum, r) => sum + r, 0)
 }
 
-export async function analyzeUntaggedImages(client: Anthropic, limit = 10): Promise<number> {
+export async function analyzeUntaggedImages(client: AIClient, limit = 10): Promise<number> {
   const untagged = await prisma.mediaItem.findMany({
     where: { imageTags: null, type: { in: ['photo', 'gif', 'video'] } },
     take: limit,
@@ -238,7 +273,7 @@ export async function analyzeUntaggedImages(client: Anthropic, limit = 10): Prom
  * Analyze ALL untagged media items (no limit). Used during full AI categorization.
  */
 export async function analyzeAllUntagged(
-  client: Anthropic,
+  client: AIClient,
   onProgress?: (total: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
@@ -338,11 +373,12 @@ ${JSON.stringify(items, null, 1)}`
 
 export async function enrichBatchSemanticTags(
   bookmarks: BookmarkForEnrichment[],
-  client: Anthropic | null,
+  client: AIClient | null,
 ): Promise<EnrichmentResult[]> {
   if (bookmarks.length === 0) return []
 
   const prompt = buildEnrichmentPrompt(bookmarks)
+  const provider = await getProvider()
 
   // Helper to parse enrichment response
   const parseResponse = (text: string): EnrichmentResult[] => {
@@ -360,16 +396,23 @@ export async function enrichBatchSemanticTags(
   }
 
   // Prefer CLI over SDK
-  if (await getCliAvailability()) {
-    const modelSetting = await getAnthropicModel()
-    const cliModel = modelNameToCliAlias(modelSetting)
+  if (provider === 'openai') {
+    if (await getCodexCliAvailability()) {
+      const result = await codexPrompt(prompt, { timeoutMs: 90_000 })
+      if (result.success && result.data) {
+        try { return parseResponse(result.data) }
+        catch { console.warn('[enrich] Codex CLI response parse failed, falling back to SDK') }
+      }
+    }
+  } else {
+    if (await getCliAvailability()) {
+      const model = await getActiveModel()
+      const cliModel = modelNameToCliAlias(model)
 
-    const result = await claudePrompt(prompt, { model: cliModel, timeoutMs: 90_000 })
-    if (result.success && result.data) {
-      try {
-        return parseResponse(result.data)
-      } catch {
-        console.warn('[enrich] CLI response parse failed, falling back to SDK')
+      const result = await claudePrompt(prompt, { model: cliModel, timeoutMs: 90_000 })
+      if (result.success && result.data) {
+        try { return parseResponse(result.data) }
+        catch { console.warn('[enrich] CLI response parse failed, falling back to SDK') }
       }
     }
   }
@@ -380,18 +423,17 @@ export async function enrichBatchSemanticTags(
     return []
   }
 
-  const model = await getAnthropicModel()
+  const model = await getActiveModel()
   const ENRICH_RETRY_DELAYS = [2000, 5000]
 
   for (let attempt = 0; attempt <= ENRICH_RETRY_DELAYS.length; attempt++) {
     try {
-      const msg = await client.messages.create({
+      const response = await client.createMessage({
         model,
         max_tokens: 4096,
         messages: [{ role: 'user', content: prompt }],
       })
-      const text = msg.content.find((b) => b.type === 'text')?.text ?? ''
-      const results = parseResponse(text)
+      const results = parseResponse(response.text)
       if (results.length > 0) return results
       console.warn(`[enrich] no JSON array in response (attempt ${attempt + 1})`)
     } catch (err) {
@@ -411,7 +453,7 @@ export async function enrichBatchSemanticTags(
  * with ENRICH_CONCURRENCY parallel batches — 5-10x fewer API calls vs. per-bookmark.
  */
 export async function enrichAllBookmarks(
-  client: Anthropic,
+  client: AIClient,
   onProgress?: (total: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
@@ -520,7 +562,7 @@ export async function enrichBookmarkSemanticTags(
   bookmarkId: string,
   tweetText: string,
   imageTags: string[],
-  client: Anthropic,
+  client: AIClient,
   entities?: BookmarkForEnrichment['entities'],
 ): Promise<string[]> {
   const results = await enrichBatchSemanticTags(

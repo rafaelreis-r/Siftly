@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
-import { resolveAnthropicClient } from '@/lib/claude-cli-auth'
+import { AIClient, resolveAIClient } from '@/lib/ai-client'
+import { getActiveModel, getProvider } from '@/lib/settings'
 import {
   seedDefaultCategories,
   categorizeBatch,
@@ -10,7 +10,6 @@ import {
   BOOKMARK_SELECT,
 } from '@/lib/categorizer'
 import {
-  getAnthropicModel,
   analyzeItem,
   runWithConcurrency,
   enrichBatchSemanticTags,
@@ -119,7 +118,7 @@ export async function DELETE(): Promise<NextResponse> {
   return NextResponse.json({ stopped: true })
 }
 
-const PIPELINE_WORKERS = 20
+const PIPELINE_WORKERS = 5
 const CAT_BATCH_SIZE = 25
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -138,10 +137,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const { bookmarkIds = [], apiKey, force = false } = body
 
   if (apiKey && typeof apiKey === 'string' && apiKey.trim() !== '') {
+    const currentProvider = await getProvider()
+    const keySlot = currentProvider === 'openai' ? 'openaiApiKey' : 'anthropicApiKey'
     await prisma.setting.upsert({
-      where: { key: 'anthropicApiKey' },
+      where: { key: keySlot },
       update: { value: apiKey.trim() },
-      create: { key: 'anthropicApiKey', value: apiKey.trim() },
+      create: { key: keySlot, value: apiKey.trim() },
     })
   }
 
@@ -170,20 +171,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     error: null,
   })
 
+  const provider = await getProvider()
+  const keyName = provider === 'openai' ? 'openaiApiKey' : 'anthropicApiKey'
   const dbApiKey =
-    (await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } }))?.value?.trim() || ''
+    (await prisma.setting.findUnique({ where: { key: keyName } }))?.value?.trim() || ''
 
   void (async () => {
     const counts = { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0 }
 
     try {
-      let client: Anthropic
+      let client: AIClient | null = null
       try {
-        client = resolveAnthropicClient({ dbKey: dbApiKey })
+        client = await resolveAIClient({ dbKey: dbApiKey })
       } catch {
-        setState({ lastError: 'No Anthropic API key configured. Go to Settings to add one, or log in with Claude CLI.' })
-        console.error('No API key or CLI auth — skipping pipeline')
-        return
+        // SDK client not available — CLI path may still work (e.g. ChatGPT OAuth via codex exec)
+        console.warn('No SDK client available — will rely on CLI path')
       }
 
         await seedDefaultCategories()
@@ -235,7 +237,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           const categoryDescriptions = Object.fromEntries(
             dbCategories.map((c) => [c.slug, c.description?.trim() || c.name]),
           )
-          const model = await getAnthropicModel()
+          const model = await getActiveModel()
 
           // Shared categorization queue (JS single-threaded: splice is atomic vs async)
           const catPending: string[] = []
@@ -296,7 +298,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             })
             if (!bm) return
 
-            // Vision: analyze any untagged media items
+            // Vision: analyze any untagged media items (SDK or CLI)
             let anyVisionRan = false
             for (const media of bm.mediaItems) {
               if (shouldAbort()) return

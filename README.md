@@ -81,7 +81,7 @@ git clone https://github.com/viperrcrypto/Siftly.git
 cd Siftly
 npm install
 npx prisma generate
-npx prisma db push
+npx prisma migrate dev --name init
 npx next dev
 ```
 
@@ -285,7 +285,6 @@ siftly/
 │   ├── import/               # 3-step import flow (instructions → upload → categorize)
 │   ├── mindmap/              # Interactive graph
 │   ├── settings/             # Configuration
-│   ├── twitter-import/       # Alternative Twitter import page
 │   └── page.tsx              # Dashboard
 │
 ├── components/
@@ -331,6 +330,18 @@ Setting           — key-value store (API keys, model preferences)
 ImportJob         — tracks import file status and progress
 ```
 
+### Prisma + SQLite + FTS5
+
+Siftly uses Prisma migrations for relational schema changes.
+In development, run `npx prisma migrate dev --name <change-name>` when schema changes.
+For runtime/prod-style startup, apply committed migrations with `npx prisma migrate deploy`.
+FTS5 (`bookmark_fts`) is managed at runtime in [`lib/fts.ts`](./lib/fts.ts), not in `schema.prisma`.
+This is intentional for now because Prisma does not model SQLite virtual table definitions directly.
+
+For Prisma command and workflow details, see:
+- https://www.prisma.io/docs/orm/prisma-migrate/workflows/development-and-production
+- https://www.prisma.io/docs/orm/prisma-client/setup-and-configuration/generating-prisma-client
+
 ---
 
 ## Tech Stack
@@ -342,7 +353,7 @@ ImportJob         — tracks import file status and progress
 | [Prisma](https://www.prisma.io) | 7 | ORM + migrations |
 | [SQLite](https://sqlite.org) | — | Local database — zero setup, includes FTS5 |
 | [Tailwind CSS](https://tailwindcss.com) | v4 | Styling |
-| [Anthropic SDK](https://anthropic.com) | — | Vision, semantic tagging, categorization, search |
+| [Anthropic SDK](https://docs.anthropic.com) | — | Vision, semantic tagging, categorization, search |
 | [@xyflow/react](https://xyflow.com) | 12 | Interactive mindmap graph |
 | [Framer Motion](https://www.framer.com/motion/) | 12 | Animations |
 | [Radix UI](https://www.radix-ui.com) | — | Accessible UI primitives |
@@ -360,7 +371,7 @@ ImportJob         — tracks import file status and progress
 # Or manually:
 npm install
 npx prisma generate
-npx prisma db push
+npx prisma migrate dev --name init
 npx next dev
 
 # Type check
