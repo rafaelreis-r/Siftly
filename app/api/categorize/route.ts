@@ -118,7 +118,12 @@ export async function DELETE(): Promise<NextResponse> {
   return NextResponse.json({ stopped: true })
 }
 
-const PIPELINE_WORKERS = 5
+// Concurrency of the categorization pipeline. Default 1 so we issue one LLM
+// request at a time — the self-hosted llama-swap router serves a single model
+// request at once, so parallel workers just pile a queue in front of it and
+// starve other services (gbrain/openwebui) sharing the GPU. Bump via env when
+// running on a provider that tolerates concurrency.
+const PIPELINE_WORKERS = Math.max(1, Number(process.env.PIPELINE_WORKERS) || 1)
 const CAT_BATCH_SIZE = 25
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
