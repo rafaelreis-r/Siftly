@@ -177,16 +177,31 @@ export class MiniMaxAIClient implements AIClient {
       return { role: 'user' as const, content: parts }
     })
 
-    const completion = await this.sdk.chat.completions.create({
+    // MiniMax M-series are reasoning models: by default they spend the token
+    // budget emitting a <think>...</think> block before the answer. For a
+    // categorizer/enricher the reasoning is not needed — set
+    // MINIMAX_REASONING_EFFORT (e.g. "none") to make the model answer directly.
+    // That cuts cost/latency and stops a small max_tokens budget from being
+    // consumed mid-<think>, which would otherwise return no usable answer.
+    const reasoningEffort = process.env.MINIMAX_REASONING_EFFORT?.trim()
+    const body: Record<string, unknown> = {
       model: params.model,
       max_tokens: params.max_tokens,
       messages,
-    })
+    }
+    if (reasoningEffort) body.reasoning_effort = reasoningEffort
+
+    const completion = await this.sdk.chat.completions.create(
+      body as unknown as OpenAI.ChatCompletionCreateParamsNonStreaming
+    )
 
     let text = completion.choices[0]?.message?.content ?? ''
-    // Strip thinking tags that MiniMax M2.5+ may include
+    // Strip closed thinking blocks that MiniMax M2.5+ may include.
     text = text.replace(/<think>[\s\S]*?<\/think>\s*/g, '')
-    return { text }
+    // If the token budget ran out mid-reasoning, the block is never closed;
+    // drop the dangling <think>... so callers never JSON.parse raw reasoning.
+    text = text.replace(/<think>[\s\S]*$/, '')
+    return { text: text.trim() }
   }
 }
 
