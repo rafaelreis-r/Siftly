@@ -42,7 +42,8 @@ const OPENAI_MODELS = [
 ]
 
 const MINIMAX_MODELS = [
-  { value: 'MiniMax-M2.7', label: 'M2.7', description: '1M Context, Latest' },
+  { value: 'MiniMax-M3', label: 'M3', description: '1M Context, Multimodal' },
+  { value: 'MiniMax-M2.7', label: 'M2.7', description: '1M Context' },
   { value: 'MiniMax-M2.5', label: 'M2.5', description: '204K Context' },
   { value: 'MiniMax-M2.5-highspeed', label: 'M2.5 Highspeed', description: '204K, Fastest' },
 ]

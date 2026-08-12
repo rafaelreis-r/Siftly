@@ -177,7 +177,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   })
 
   const provider = await getProvider()
-  const keyName = provider === 'openai' ? 'openaiApiKey' : 'anthropicApiKey'
+  const keyName = provider === 'openai' ? 'openaiApiKey' : provider === 'minimax' ? 'minimaxApiKey' : 'anthropicApiKey'
   const dbApiKey =
     (await prisma.setting.findUnique({ where: { key: keyName } }))?.value?.trim() || ''
 

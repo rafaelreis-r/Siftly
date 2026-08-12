@@ -24,6 +24,7 @@ const ALLOWED_OPENAI_MODELS = [
 ] as const
 
 const ALLOWED_MINIMAX_MODELS = [
+  'MiniMax-M3',
   'MiniMax-M2.7',
   'MiniMax-M2.5',
   'MiniMax-M2.5-highspeed',
