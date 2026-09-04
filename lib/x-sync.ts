@@ -7,8 +7,8 @@ export async function syncBookmarks(
   authToken: string,
   ct0: string,
 ): Promise<{ imported: number; skipped: number }> {
-  if (syncing) throw new Error('A sync is already in progress')
-  syncing = true
+  if (scheduler.syncing) throw new Error('A sync is already in progress')
+  scheduler.syncing = true
 
   try {
     let imported = 0
@@ -41,92 +41,200 @@ export async function syncBookmarks(
       }
     }
 
-    // Only update last sync timestamp if we actually fetched tweets
-    if (imported > 0 || skipped > 0) {
-      const now = new Date().toISOString()
-      await prisma.setting.upsert({
+    const now = new Date().toISOString()
+    await Promise.all([
+      prisma.setting.upsert({
         where: { key: 'x_last_sync' },
         update: { value: now },
         create: { key: 'x_last_sync', value: now },
-      })
-    }
+      }),
+      prisma.setting.deleteMany({ where: { key: 'x_sync_error' } }),
+    ])
 
     return { imported, skipped }
   } finally {
-    syncing = false
+    scheduler.syncing = false
   }
 }
 
-// ── Scheduler ───────────────────────────────────────────────────────────────────
+// ── Schedule ────────────────────────────────────────────────────────────────────
 
-type SyncInterval = '1h' | '4h' | '8h' | '24h'
+export const SYNC_INTERVALS = ['off', '1h', '4h', '8h', '24h'] as const
 
-const INTERVAL_MS: Record<SyncInterval, number> = {
+export type SyncInterval = (typeof SYNC_INTERVALS)[number]
+
+export type SyncError = { message: string; at: string; kind: 'auth' | 'transient' }
+
+export type ScheduleSnapshot = {
+  interval: SyncInterval
+  hasCredentials: boolean
+  lastSyncAt: Date | null
+  lastError: SyncError | null
+}
+
+export type ScheduleState =
+  | { kind: 'off' }
+  | { kind: 'no-credentials' }
+  | { kind: 'due' }
+  | { kind: 'waiting'; nextDueAt: Date }
+
+const INTERVAL_MS: Record<Exclude<SyncInterval, 'off'>, number> = {
   '1h': 60 * 60 * 1000,
   '4h': 4 * 60 * 60 * 1000,
   '8h': 8 * 60 * 60 * 1000,
   '24h': 24 * 60 * 60 * 1000,
 }
 
-let schedulerTimer: ReturnType<typeof setInterval> | null = null
-let syncing = false
+export function isSyncInterval(value: unknown): value is SyncInterval {
+  return typeof value === 'string' && (SYNC_INTERVALS as readonly string[]).includes(value)
+}
 
-export async function startScheduler() {
-  stopScheduler()
+export function parseSyncError(raw: string | null | undefined): SyncError | null {
+  if (!raw) return null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const { message, at, kind } = parsed as Record<string, unknown>
+    if (typeof message !== 'string' || typeof at !== 'string') return null
+    if (kind !== 'auth' && kind !== 'transient') return null
+    return { message, at, kind }
+  } catch {
+    return null
+  }
+}
 
-  const intervalSetting = await prisma.setting.findUnique({ where: { key: 'x_sync_interval' } })
-  if (!intervalSetting?.value || intervalSetting.value === 'off') return
+export function evaluateSchedule(snapshot: ScheduleSnapshot, now: Date): ScheduleState {
+  const { interval, hasCredentials, lastSyncAt, lastError } = snapshot
 
-  const interval = intervalSetting.value as SyncInterval
-  const ms = INTERVAL_MS[interval]
-  if (!ms) {
-    console.warn(`[x-sync] Invalid sync interval "${intervalSetting.value}" in database, not starting scheduler`)
-    return
+  if (interval === 'off') return { kind: 'off' }
+  if (!hasCredentials) return { kind: 'no-credentials' }
+  if (!lastSyncAt) return { kind: 'due' }
+
+  let since = lastSyncAt.getTime()
+  if (lastError?.kind === 'auth') {
+    const erroredAt = new Date(lastError.at).getTime()
+    if (Number.isFinite(erroredAt)) since = Math.max(since, erroredAt)
   }
 
-  schedulerTimer = setInterval(() => void runScheduledSync(), ms)
-  console.log(`[x-sync] Scheduler started: every ${interval}`)
+  const dueAt = new Date(since + INTERVAL_MS[interval])
+  return now.getTime() >= dueAt.getTime() ? { kind: 'due' } : { kind: 'waiting', nextDueAt: dueAt }
+}
+
+const SCHEDULE_KEYS = ['x_auth_token', 'x_ct0', 'x_sync_interval', 'x_last_sync', 'x_sync_error']
+
+async function readSchedule(): Promise<{
+  snapshot: ScheduleSnapshot
+  credentials: { authToken: string; ct0: string } | null
+}> {
+  const rows = await prisma.setting.findMany({ where: { key: { in: SCHEDULE_KEYS } } })
+  const value = (key: string) => rows.find((row) => row.key === key)?.value || null
+
+  const authToken = value('x_auth_token')
+  const ct0 = value('x_ct0')
+  const interval = value('x_sync_interval')
+  const lastSync = value('x_last_sync')
+  const lastSyncAt = lastSync ? new Date(lastSync) : null
+
+  return {
+    credentials: authToken && ct0 ? { authToken, ct0 } : null,
+    snapshot: {
+      interval: isSyncInterval(interval) ? interval : 'off',
+      hasCredentials: !!(authToken && ct0),
+      lastSyncAt: lastSyncAt && Number.isFinite(lastSyncAt.getTime()) ? lastSyncAt : null,
+      lastError: parseSyncError(value('x_sync_error')),
+    },
+  }
+}
+
+export async function readScheduleSnapshot(): Promise<ScheduleSnapshot> {
+  return (await readSchedule()).snapshot
+}
+
+// ── Scheduler ───────────────────────────────────────────────────────────────────
+
+const TICK_MS = 15 * 60 * 1000
+
+type SchedulerState = {
+  timer: ReturnType<typeof setInterval> | null
+  syncing: boolean
+  lastIdleLog: string | null
+}
+
+// Pinned to globalThis, like the PrismaClient in lib/db, because Next bundles this module into
+// several server chunks. Plain module-level state would give instrumentation.ts and the route
+// handlers a timer and a `syncing` flag each, within one process. `isSchedulerRunning()` would
+// not see the timer armed at boot, and two tickers could sync concurrently.
+const scheduler = ((globalThis as unknown as { xSyncScheduler?: SchedulerState }).xSyncScheduler ??= {
+  timer: null,
+  syncing: false,
+  lastIdleLog: null,
+})
+
+export function startScheduler() {
+  stopScheduler()
+  scheduler.timer = setInterval(() => void runTick(), TICK_MS)
+  console.log(`[x-sync] Scheduler armed, ticking every ${TICK_MS / 60_000}m`)
+  void runTick()
 }
 
 export function stopScheduler() {
-  if (schedulerTimer) {
-    clearInterval(schedulerTimer)
-    schedulerTimer = null
+  if (scheduler.timer) {
+    clearInterval(scheduler.timer)
+    scheduler.timer = null
+    scheduler.lastIdleLog = null
     console.log('[x-sync] Scheduler stopped')
   }
 }
 
-async function runScheduledSync() {
-  if (syncing) return
+async function runTick() {
+  if (scheduler.syncing) return
 
   try {
-    const [authSetting, ct0Setting] = await Promise.all([
-      prisma.setting.findUnique({ where: { key: 'x_auth_token' } }),
-      prisma.setting.findUnique({ where: { key: 'x_ct0' } }),
-    ])
+    const { snapshot, credentials } = await readSchedule()
+    const state = evaluateSchedule(snapshot, new Date())
 
-    if (!authSetting?.value || !ct0Setting?.value) {
-      console.log('[x-sync] Skipping scheduled sync: missing credentials')
+    if (state.kind !== 'due') {
+      const idle =
+        state.kind === 'waiting'
+          ? `next sync due at ${state.nextDueAt.toISOString()}`
+          : state.kind === 'off'
+            ? 'auto-sync is off'
+            : 'auto-sync is on but X credentials are missing'
+      if (idle !== scheduler.lastIdleLog) {
+        scheduler.lastIdleLog = idle
+        console.log(`[x-sync] ${idle}`)
+      }
       return
     }
+    if (!credentials) return
+    scheduler.lastIdleLog = null
 
-    console.log(`[x-sync] Running scheduled sync at ${new Date().toISOString()}`)
-    const result = await syncBookmarks(authSetting.value, ct0Setting.value)
-    console.log(`[x-sync] Sync complete: ${result.imported} imported, ${result.skipped} skipped`)
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    console.error('[x-sync] Scheduled sync failed:', message)
-    if (message.includes('401') || message.includes('403')) {
-      console.error('[x-sync] Auth error detected, stopping scheduler')
-      stopScheduler()
+    try {
+      const { imported, skipped } = await syncBookmarks(credentials.authToken, credentials.ct0)
+      console.log(`[x-sync] Sync complete: ${imported} imported, ${skipped} skipped`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      // Losing a race with a manual sync is contention, not a sync failure worth recording.
+      if (message.includes('already in progress')) return
+      const kind: SyncError['kind'] =
+        message.includes('401') || message.includes('403') ? 'auth' : 'transient'
+      console.error(`[x-sync] Sync failed (${kind}): ${message}`)
+      const record = JSON.stringify({ message, at: new Date().toISOString(), kind } satisfies SyncError)
+      await prisma.setting.upsert({
+        where: { key: 'x_sync_error' },
+        update: { value: record },
+        create: { key: 'x_sync_error', value: record },
+      })
     }
+  } catch (err) {
+    console.error('[x-sync] Scheduler tick failed:', err instanceof Error ? err.message : String(err))
   }
 }
 
 export function isSchedulerRunning() {
-  return schedulerTimer !== null
+  return scheduler.timer !== null
 }
 
 export function isSyncing() {
-  return syncing
+  return scheduler.syncing
 }
