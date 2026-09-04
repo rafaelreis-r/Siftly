@@ -2,8 +2,9 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react'
 import Link from 'next/link'
-import { Upload, CheckCircle, ChevronRight, Loader2, Copy, Check, ExternalLink, Sparkles, Eye, Tag, Brain, Layers, StopCircle, RefreshCw, Clock, KeyRound, Trash2 } from 'lucide-react'
+import { Upload, CheckCircle, ChevronRight, Loader2, Copy, Check, ExternalLink, Sparkles, Eye, Tag, Brain, Layers, StopCircle, RefreshCw, Clock, KeyRound, Trash2, TriangleAlert } from 'lucide-react'
 import * as Progress from '@radix-ui/react-progress'
+import type { SyncError } from '@/lib/x-sync'
 
 type Step = 1 | 2 | 3
 type Method = 'bookmarklet' | 'console' | 'live'
@@ -655,6 +656,8 @@ interface LiveConfig {
   syncInterval: string
   lastSync: string | null
   schedulerRunning: boolean
+  nextSyncAt: string | null
+  syncError: SyncError | null
 }
 
 const INTERVAL_LABELS: Record<string, string> = {
@@ -674,21 +677,21 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
   const [interval, setInterval_] = useState('off')
   const [error, setError] = useState('')
 
-  useEffect(() => {
-    fetch('/api/import/live')
-      .then(async (r) => {
-        if (!r.ok) {
-          setError('Failed to load sync configuration')
-          return
-        }
-        const data: LiveConfig = await r.json()
-        setConfig(data)
-        setInterval_(data.syncInterval)
-      })
-      .catch(() => {
-        setError('Could not connect to the server')
-      })
+  const refreshConfig = useCallback(async () => {
+    try {
+      const res = await fetch('/api/import/live')
+      if (!res.ok) throw new Error('Failed to load sync configuration')
+      const data: LiveConfig = await res.json()
+      setConfig(data)
+      setInterval_(data.syncInterval)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not connect to the server')
+    }
   }, [])
+
+  useEffect(() => {
+    void refreshConfig()
+  }, [refreshConfig])
 
   async function handleSaveCredentials() {
     if (!authToken.trim() || !ct0.trim()) {
@@ -707,12 +710,9 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error ?? 'Failed to save')
       }
-      setConfig((c) => c
-        ? { ...c, hasCredentials: true }
-        : { hasCredentials: true, syncInterval: 'off', lastSync: null, schedulerRunning: false },
-      )
       setAuthToken('')
       setCt0('')
+      await refreshConfig()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save')
     } finally {
@@ -724,8 +724,7 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
     try {
       const res = await fetch('/api/import/live', { method: 'DELETE' })
       if (!res.ok) throw new Error('Failed to remove credentials')
-      setConfig((c) => c ? { ...c, hasCredentials: false, lastSync: null, schedulerRunning: false, syncInterval: 'off' } : c)
-      setInterval_('off')
+      await refreshConfig()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to remove credentials')
     }
@@ -741,6 +740,7 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
       const imported = data.imported ?? 0
       const skipped = data.skipped ?? 0
       onSynced({ imported, skipped, total: imported + skipped, parsed: imported + skipped })
+      await refreshConfig()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sync failed')
     } finally {
@@ -761,11 +761,13 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error ?? 'Failed to update sync schedule')
       }
-      setConfig((c) => c ? { ...c, syncInterval: newInterval, schedulerRunning: newInterval !== 'off' } : c)
     } catch (err) {
       setInterval_(previousInterval)
       setError(err instanceof Error ? err.message : 'Failed to update sync schedule')
+      return
     }
+
+    await refreshConfig()
   }
 
   return (
@@ -880,10 +882,39 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
                 </button>
               ))}
             </div>
-            {interval !== 'off' && (
-              <p className="text-xs text-zinc-600 mt-2">
-                Siftly will automatically sync new bookmarks from X {INTERVAL_LABELS[interval]?.toLowerCase()}
-              </p>
+            {config.syncInterval !== 'off' && (
+              <div className="mt-2 space-y-2">
+                {config.schedulerRunning ? (
+                  <p className="text-xs text-zinc-600">
+                    Siftly will automatically sync new bookmarks from X {INTERVAL_LABELS[config.syncInterval]?.toLowerCase()}
+                    {config.nextSyncAt
+                      ? ` · Next run: ${new Date(config.nextSyncAt).toLocaleString()}`
+                      : ' · A sync is due now'}
+                  </p>
+                ) : (
+                  <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-amber-500/8 border border-amber-500/20">
+                    <TriangleAlert size={15} className="text-amber-400 shrink-0 mt-0.5" />
+                    <span className="text-sm text-amber-300">
+                      Auto-sync is configured but is not running in this process. Restart the server, or
+                      re-select the interval above, to arm it.
+                    </span>
+                  </div>
+                )}
+                {config.syncError && (
+                  <p
+                    className={
+                      config.syncError.kind === 'auth'
+                        ? 'text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2'
+                        : 'text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2'
+                    }
+                  >
+                    Last auto-sync failed at {new Date(config.syncError.at).toLocaleString()}: {config.syncError.message}
+                    {config.syncError.kind === 'auth'
+                      ? ' Your X session cookies have expired. Save auth_token and ct0 again to resume auto-sync.'
+                      : ' Siftly will retry on the next tick.'}
+                  </p>
+                )}
+              </div>
             )}
           </div>
         </>
